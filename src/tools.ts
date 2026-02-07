@@ -1,10 +1,6 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { zellijAction, zellijCommand } from "./zellij.js";
-import { readdir, writeFile, readFile, chmod } from "node:fs/promises";
-import { join } from "node:path";
-
-const SCRIPTS_DIR = join(import.meta.dirname, "..", "scripts");
+import { zellijAction } from "./zellij.js";
 
 // --- Workspace state tools ---
 
@@ -144,12 +140,17 @@ const renameTab = tool(
 
 const newPane = tool(
   "new_pane",
-  "Open a new pane. Can be tiled (with direction), floating, stacked, or in-place. Optionally runs a command.",
+  `Open a new pane. Common patterns:
+- Simple split: new_pane()
+- Floating pane: new_pane(floating=true)
+- Run a command: new_pane(command=["htop"])
+- Floating with command: new_pane(floating=true, command=["kubectl", "logs", "-f", "pod/foo"])
+Notes: direction is for tiled panes only. x/y/width/height/pinned are for floating panes only.`,
   {
     direction: z
-      .enum(["right", "down"])
+      .enum(["left", "right", "up", "down"])
       .optional()
-      .describe("Direction for tiled pane"),
+      .describe("Direction for tiled pane (not used with floating)"),
     floating: z.boolean().optional().describe("Open as floating pane"),
     stacked: z.boolean().optional().describe("Open as stacked pane"),
     command: z
@@ -162,11 +163,11 @@ const newPane = tool(
       .boolean()
       .optional()
       .describe("Close pane when command exits"),
-    pinned: z.boolean().optional().describe("Pin floating pane on top"),
-    width: z.string().optional().describe("Width (e.g. '50%' or '80')"),
-    height: z.string().optional().describe("Height (e.g. '50%' or '24')"),
-    x: z.string().optional().describe("X position (e.g. '10%' or '5')"),
-    y: z.string().optional().describe("Y position (e.g. '10%' or '5')"),
+    pinned: z.boolean().optional().describe("Pin floating pane on top (floating only)"),
+    width: z.string().optional().describe("Width, e.g. '50%' or '80' (floating only)"),
+    height: z.string().optional().describe("Height, e.g. '50%' or '24' (floating only)"),
+    x: z.string().optional().describe("X position, e.g. '10%' or '5' (floating only)"),
+    y: z.string().optional().describe("Y position, e.g. '10%' or '5' (floating only)"),
   },
   async (args) => {
     const flags: string[] = [];
@@ -373,77 +374,6 @@ const writeToPane = tool(
   }
 );
 
-// --- Script tools ---
-
-const saveScript = tool(
-  "save_script",
-  "Save a named bash script to the scripts directory. The script will be chmod +x.",
-  {
-    name: z
-      .string()
-      .describe("Script filename (without .sh extension)"),
-    content: z.string().describe("Script content (include shebang and description comment)"),
-  },
-  async (args) => {
-    const filename = args.name.endsWith(".sh") ? args.name : `${args.name}.sh`;
-    const filepath = join(SCRIPTS_DIR, filename);
-    await writeFile(filepath, args.content);
-    await chmod(filepath, 0o755);
-    return {
-      content: [
-        { type: "text", text: `Saved script: ${filepath}` },
-      ],
-    };
-  }
-);
-
-const runScript = tool(
-  "run_script",
-  "Execute a saved script by name.",
-  {
-    name: z.string().describe("Script name (with or without .sh)"),
-  },
-  async (args) => {
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const execAsync = promisify(execFile);
-    const filename = args.name.endsWith(".sh") ? args.name : `${args.name}.sh`;
-    const filepath = join(SCRIPTS_DIR, filename);
-    const { stdout, stderr } = await execAsync("bash", [filepath]);
-    const output = [stdout, stderr].filter(Boolean).join("\n");
-    return { content: [{ type: "text", text: output || "Script completed" }] };
-  }
-);
-
-const listScripts = tool(
-  "list_scripts",
-  "List all saved automation scripts with their description comments.",
-  {},
-  async () => {
-    const files = await readdir(SCRIPTS_DIR);
-    const scripts = files.filter(
-      (f) => f.endsWith(".sh") && f !== ".gitkeep"
-    );
-    if (scripts.length === 0) {
-      return { content: [{ type: "text", text: "No scripts saved yet." }] };
-    }
-    const descriptions = await Promise.all(
-      scripts.map(async (f) => {
-        const content = await readFile(join(SCRIPTS_DIR, f), "utf-8");
-        const desc =
-          content
-            .split("\n")
-            .find((l) => l.startsWith("# ") && !l.startsWith("#!"))
-            ?.slice(2) ?? "(no description)";
-        return `- ${f}: ${desc}`;
-      })
-    );
-    return {
-      content: [{ type: "text", text: descriptions.join("\n") }],
-    };
-  }
-);
-
 // --- Escape hatch ---
 
 const zellijActionTool = tool(
@@ -489,10 +419,6 @@ export const zellijMcpServer = createSdkMcpServer({
     toggleFullscreen,
     changeFloatingPaneCoordinates,
     writeToPane,
-    // Scripts
-    saveScript,
-    runScript,
-    listScripts,
     // Escape hatch
     zellijActionTool,
   ],

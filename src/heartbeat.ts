@@ -2,10 +2,15 @@ import { zellijAction } from "./zellij.js";
 import { heartbeatQuery } from "./agent.js";
 
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const INITIAL_DELAY_MS = 2 * 60 * 1000; // 2 minutes
 
-let timer: ReturnType<typeof setInterval> | null = null;
+let delayTimer: ReturnType<typeof setTimeout> | null = null;
+let intervalTimer: ReturnType<typeof setInterval> | null = null;
+let busy = false;
 
 async function check(): Promise<void> {
+  if (busy) return; // skip while user is actively chatting
+
   try {
     const [layout, tabs] = await Promise.all([
       zellijAction("dump-layout"),
@@ -14,17 +19,27 @@ async function check(): Promise<void> {
 
     const suggestion = await heartbeatQuery(layout.stdout, tabs.stdout);
 
-    if (suggestion && suggestion !== "NOTHING") {
+    if (suggestion && suggestion !== "NOTHING" && !busy) {
       await showPopup(suggestion);
     }
-  } catch (err) {
+  } catch {
     // Silently skip — Zellij might not be available or we're in a weird state
   }
 }
 
 async function showPopup(message: string): Promise<void> {
-  // Show a small floating pane with the suggestion that auto-closes after 30s
-  const escapedMessage = message.replace(/'/g, "'\\''");
+  // Use node -e with JSON.stringify to avoid shell injection.
+  // zellij passes args directly to the process (no shell), and
+  // JSON.stringify safely encodes any LLM output.
+  const script = [
+    `const m = ${JSON.stringify(message)};`,
+    `console.log("");`,
+    `console.log("  " + m);`,
+    `console.log("");`,
+    `console.log("  (auto-closes in 30s — press Alt+j to chat)");`,
+    `setTimeout(() => {}, 30000);`,
+  ].join(" ");
+
   await zellijAction(
     "new-pane",
     "--floating",
@@ -40,23 +55,31 @@ async function showPopup(message: string): Promise<void> {
     "--y",
     "2",
     "--",
-    "bash",
-    "-c",
-    `echo ''; echo '  ${escapedMessage}'; echo ''; echo '  (auto-closes in 30s — press Alt+j to chat)'; sleep 30`
+    "node",
+    "-e",
+    script
   );
 }
 
+export function setBusy(value: boolean): void {
+  busy = value;
+}
+
 export function startHeartbeat(): void {
-  // Run first check after 2 minutes (give user time to settle in)
-  setTimeout(() => {
+  delayTimer = setTimeout(() => {
+    delayTimer = null;
     check();
-    timer = setInterval(check, HEARTBEAT_INTERVAL_MS);
-  }, 2 * 60 * 1000);
+    intervalTimer = setInterval(check, HEARTBEAT_INTERVAL_MS);
+  }, INITIAL_DELAY_MS);
 }
 
 export function stopHeartbeat(): void {
-  if (timer) {
-    clearInterval(timer);
-    timer = null;
+  if (delayTimer) {
+    clearTimeout(delayTimer);
+    delayTimer = null;
+  }
+  if (intervalTimer) {
+    clearInterval(intervalTimer);
+    intervalTimer = null;
   }
 }

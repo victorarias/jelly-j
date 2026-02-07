@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const TIMEOUT_MS = 10_000;
 
 export interface ZellijResult {
   stdout: string;
@@ -10,24 +11,15 @@ export interface ZellijResult {
 
 /**
  * Run a `zellij action` subcommand and return stdout/stderr.
- * Throws on non-zero exit code.
+ * Throws on non-zero exit code or timeout (10s).
  */
 export async function zellijAction(
   ...args: string[]
 ): Promise<ZellijResult> {
-  const { stdout, stderr } = await execFileAsync("zellij", [
-    "action",
-    ...args,
-  ]);
-  return { stdout: stdout.trim(), stderr: stderr.trim() };
-}
-
-/**
- * Run a top-level `zellij` subcommand (e.g. `zellij list-sessions`).
- */
-export async function zellijCommand(
-  ...args: string[]
-): Promise<ZellijResult> {
-  const { stdout, stderr } = await execFileAsync("zellij", args);
+  const { stdout, stderr } = await execFileAsync(
+    "zellij",
+    ["action", ...args],
+    { timeout: TIMEOUT_MS }
+  );
   return { stdout: stdout.trim(), stderr: stderr.trim() };
 }

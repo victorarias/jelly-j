@@ -1,10 +1,26 @@
 import { createInterface } from "node:readline";
 import { chat } from "./agent.js";
-import { startHeartbeat, stopHeartbeat } from "./heartbeat.js";
+import { startHeartbeat, stopHeartbeat, setBusy } from "./heartbeat.js";
 
-const GREETING = `  Jelly J here! What can I help you with?
+const GREETING = `
+       ___
+      (o o)
+     ( (_) )
+      /| |\\
+     / | | \\
+        ~ ~
+       __     ____             __
+      / /__  / / /_  __       / /
+ __  / / _ \\/ / / / / /  __  / /
+/ /_/ /  __/ / / /_/ /  / /_/ /
+\\____/\\___/_/_/\\__, /   \\____/
+              /____/
+
+  What can I help you with?
   (type "exit" or "bye" to close)
 `;
+
+const display = (text: string) => process.stdout.write(text);
 
 async function main(): Promise<void> {
   console.log(GREETING);
@@ -30,22 +46,28 @@ async function main(): Promise<void> {
     }
 
     if (["exit", "bye", "quit", "q"].includes(input.toLowerCase())) {
-      console.log("\n  See you! 🪼\n");
+      console.log("\n  See you!\n");
       shutdown(rl);
       return;
     }
 
+    // Pause readline to prevent concurrent queries from rapid input.
+    // Buffered input will be processed after resume.
+    rl.pause();
+    setBusy(true);
+
     try {
-      const result = await chat(input, sessionId);
+      const result = await chat(input, sessionId, display);
       sessionId = result.sessionId;
-      // Ensure we end on a newline before the next prompt
-      process.stdout.write("\n\n");
+      display("\n\n");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`\n  [error] ${msg}\n`);
+    } finally {
+      setBusy(false);
+      rl.resume();
+      rl.prompt();
     }
-
-    rl.prompt();
   });
 
   rl.on("close", () => {

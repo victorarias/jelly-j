@@ -31,35 +31,39 @@ You can:
 - Create, rename, close, and organize tabs
 - Create panes (tiled, floating, pinned, stacked) running any command
 - Move and resize panes within a tab
-- Write automation scripts for repetitive tasks
 - Help the user find things in their workspace
 
 For complex reorganizations (like "sort everything by project"), work
 step by step: understand the current state, make a plan, execute it,
-then confirm the result.
+then confirm the result.`;
 
-When saving scripts, always include a comment header explaining what
-the script does.`;
+export type DisplayFn = (text: string) => void;
 
 /**
- * Send a user message and stream assistant response to the console.
- * Uses the Agent SDK with the zellij MCP server.
- * Returns the assistant's text response.
+ * Send a user message and stream assistant response via the display callback.
+ *
+ * Each call spawns a new Claude Code subprocess. The SDK's v2 session API
+ * (unstable_v2_createSession) would avoid per-turn subprocess overhead, but
+ * it doesn't support mcpServers or systemPrompt yet — so we use query()
+ * with resume for now.
+ *
+ * SDK MCP servers require streaming input mode (AsyncGenerator), which is
+ * why we use the generator form even for a single message.
  */
 export async function chat(
   userMessage: string,
-  sessionId?: string
-): Promise<{ text: string; sessionId?: string }> {
-  let resultText = "";
+  sessionId: string | undefined,
+  display: DisplayFn
+): Promise<{ sessionId?: string }> {
   let newSessionId: string | undefined;
 
+  // SDK MCP servers require streaming input mode (async generator).
+  // session_id is required by the type but only meaningful for resumed sessions.
+  // For new sessions the SDK assigns a real session_id on init.
   async function* generateMessages(): AsyncGenerator<SDKUserMessage> {
     yield {
       type: "user",
-      message: {
-        role: "user",
-        content: userMessage,
-      },
+      message: { role: "user", content: userMessage },
       parent_tool_use_id: null,
       session_id: sessionId ?? "",
     };
@@ -68,9 +72,7 @@ export async function chat(
   const options: Options = {
     systemPrompt: SYSTEM_PROMPT,
     model: "claude-opus-4-6",
-    mcpServers: {
-      zellij: zellijMcpServer,
-    },
+    mcpServers: { zellij: zellijMcpServer },
     allowedTools: ["mcp__zellij__*"],
     maxTurns: 20,
     permissionMode: "bypassPermissions",
@@ -85,41 +87,39 @@ export async function chat(
     prompt: generateMessages(),
     options,
   })) {
-    handleMessage(message);
+    renderMessage(message, display);
 
     if (message.type === "system" && "subtype" in message && message.subtype === "init") {
       newSessionId = (message as SDKSystemMessage).session_id;
     }
 
     if (message.type === "result") {
-      if ("result" in message) {
-        resultText = (message as SDKResultSuccess).result ?? "";
-      } else {
-        resultText = `[Error: ${(message as SDKResultError).subtype}]`;
+      if (message.subtype !== "success") {
+        const err = message as SDKResultError;
+        display(`\n  [${err.subtype}] ${err.errors.join("; ")}`);
       }
     }
   }
 
-  return { text: resultText, sessionId: newSessionId ?? sessionId };
+  return { sessionId: newSessionId ?? sessionId };
 }
 
-function handleMessage(message: SDKMessage): void {
-  if (message.type === "assistant") {
-    const assistantMsg = message as SDKAssistantMessage;
-    const content = assistantMsg.message?.content;
+function renderMessage(message: SDKMessage, display: DisplayFn): void {
+  if (message.type !== "assistant") return;
 
-    if (content) {
-      for (const block of content) {
-        if (block.type === "text") {
-          process.stdout.write(block.text);
-        } else if (block.type === "tool_use") {
-          const input = block.input as Record<string, unknown>;
-          const inputStr = Object.entries(input)
-            .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-            .join(" ");
-          process.stdout.write(`\n  [zellij] ${block.name} ${inputStr}\n`);
-        }
-      }
+  const assistantMsg = message as SDKAssistantMessage;
+  const content = assistantMsg.message?.content;
+  if (!content) return;
+
+  for (const block of content) {
+    if (block.type === "text") {
+      display(block.text);
+    } else if (block.type === "tool_use") {
+      const input = block.input as Record<string, unknown>;
+      const inputStr = Object.entries(input)
+        .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+        .join(" ");
+      display(`\n  [zellij] ${block.name} ${inputStr}\n`);
     }
   }
 }
@@ -154,10 +154,11 @@ If nothing worth suggesting, respond with exactly: NOTHING`;
     model: "claude-haiku-4-5-20251001",
     maxTurns: 1,
     tools: [],
+    persistSession: false,
   };
 
   for await (const message of query({ prompt, options })) {
-    if (message.type === "result" && "result" in message) {
+    if (message.type === "result" && message.subtype === "success") {
       result = (message as SDKResultSuccess).result ?? "NOTHING";
     }
   }

@@ -1,11 +1,35 @@
 {
-  "name": "zellij-assistant",
+  "name": "jelly-j",
   "version": "0.1.0",
   "description": "Jelly J — Claude-powered Zellij workspace assistant",
   "type": "module",
+  "bin": {
+    "jelly-j": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "zellij",
+    "terminal",
+    "multiplexer",
+    "claude",
+    "ai",
+    "assistant",
+    "workspace"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/victorarias/jelly-j"
+  },
+  "license": "MIT",
   "scripts": {
     "start": "node --import tsx src/index.ts",
-    "build": "tsc",
+    "build": "tsup",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -14,6 +38,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "tsup": "^8.5.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }
