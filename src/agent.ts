@@ -129,9 +129,14 @@ async function askPermissionPrompt(
   const readLine = async (): Promise<string> => {
     processStdin.resume();
     return await new Promise<string>((resolve) => {
+      let buffer = "";
       const onData = (chunk: string | Buffer): void => {
+        buffer += String(chunk);
+        const newlineIndex = buffer.search(/[\r\n]/);
+        if (newlineIndex === -1) return;
+
         processStdin.off("data", onData);
-        resolve(String(chunk));
+        resolve(buffer.slice(0, newlineIndex));
       };
       processStdin.on("data", onData);
     });
