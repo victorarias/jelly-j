@@ -1,6 +1,18 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
+import { promises as fs, type Dirent } from "node:fs";
+import path from "node:path";
 import { z } from "zod";
 import { zellijAction } from "./zellij.js";
+import {
+  getInstalledZellijVersion,
+  getZellijConfigInfo,
+  getZellijConfigRoots,
+  resolveZellijConfigPath,
+} from "./zellijConfig.js";
+import {
+  ZELLIJ_KNOWLEDGE_GUIDE,
+  searchZellijKnowledge,
+} from "./zellijKnowledge.js";
 
 // --- Workspace state tools ---
 
@@ -374,6 +386,393 @@ const writeToPane = tool(
   }
 );
 
+// --- Config and docs tools ---
+
+async function backupFileIfExists(filePath: string): Promise<string | undefined> {
+  try {
+    await fs.access(filePath);
+  } catch {
+    return undefined;
+  }
+
+  const backupPath = `${filePath}.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  await fs.copyFile(filePath, backupPath);
+  return backupPath;
+}
+
+async function listFilesUnder(
+  rootDir: string,
+  maxEntries: number,
+  includeHidden: boolean,
+  seenAbsPaths: Set<string>
+): Promise<string[]> {
+  const results: string[] = [];
+  const queue: Array<{ abs: string; rel: string }> = [{ abs: rootDir, rel: "" }];
+
+  while (queue.length > 0 && results.length < maxEntries) {
+    const current = queue.shift();
+    if (!current) break;
+
+    let dirents: Dirent[];
+    try {
+      dirents = await fs.readdir(current.abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    dirents.sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const dirent of dirents) {
+      if (!includeHidden && dirent.name.startsWith(".")) continue;
+      const relPath = current.rel
+        ? path.posix.join(current.rel, dirent.name)
+        : dirent.name;
+      const absPath = path.join(current.abs, dirent.name);
+      const normalizedAbsPath = path.resolve(absPath);
+      if (seenAbsPaths.has(normalizedAbsPath)) continue;
+      seenAbsPaths.add(normalizedAbsPath);
+      if (dirent.isDirectory()) {
+        results.push(`${relPath}/`);
+        if (results.length >= maxEntries) break;
+        queue.push({ abs: absPath, rel: relPath });
+      } else {
+        results.push(relPath);
+        if (results.length >= maxEntries) break;
+      }
+    }
+  }
+
+  return results;
+}
+
+function utf8SequenceLength(firstByte: number): number {
+  if ((firstByte & 0b1000_0000) === 0) return 1;
+  if ((firstByte & 0b1110_0000) === 0b1100_0000) return 2;
+  if ((firstByte & 0b1111_0000) === 0b1110_0000) return 3;
+  if ((firstByte & 0b1111_1000) === 0b1111_0000) return 4;
+  return 1;
+}
+
+function safeUtf8SliceEnd(buffer: Buffer, maxBytes: number): number {
+  if (maxBytes <= 0) return 0;
+  if (maxBytes >= buffer.length) return buffer.length;
+
+  let end = maxBytes;
+
+  // If maxBytes lands in a multi-byte continuation range, back up to the lead byte.
+  while (end > 0 && (buffer[end] & 0b1100_0000) === 0b1000_0000) {
+    end -= 1;
+  }
+
+  if (end === 0) return 0;
+
+  const lead = buffer[end];
+  const seqLen = utf8SequenceLength(lead);
+  if (end + seqLen > maxBytes) {
+    return end;
+  }
+
+  return maxBytes;
+}
+
+function truncateUtf8ToBytes(
+  buffer: Buffer,
+  maxBytes: number
+): { text: string; returnedBytes: number; truncated: boolean } {
+  if (buffer.length <= maxBytes) {
+    return { text: buffer.toString("utf8"), returnedBytes: buffer.length, truncated: false };
+  }
+
+  const safeEnd = safeUtf8SliceEnd(buffer, maxBytes);
+  const slice = buffer.subarray(0, safeEnd);
+  return {
+    text: slice.toString("utf8"),
+    returnedBytes: slice.length,
+    truncated: true,
+  };
+}
+
+const getZellijConfigInfoTool = tool(
+  "get_zellij_config_info",
+  "Return detected zellij config locations (config file, config dir, layouts, cache, plugins) using `zellij setup --check` when available.",
+  {},
+  async () => {
+    const info = await getZellijConfigInfo();
+    const installedVersion = await getInstalledZellijVersion();
+    const roots = getZellijConfigRoots(info);
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              installed_zellij_version: installedVersion ?? null,
+              setup_check_zellij_version: info.zellijVersion ?? null,
+              source: info.source,
+              config_dir: info.configDir,
+              config_file: info.configFile,
+              layout_dir: info.layoutDir,
+              cache_dir: info.cacheDir ?? null,
+              data_dir: info.dataDir ?? null,
+              plugin_dir: info.pluginDir ?? null,
+              config_roots: roots,
+              setup_check_output: info.setupOutput ?? null,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+const listZellijConfigFilesTool = tool(
+  "list_zellij_config_files",
+  "List files under the active zellij config roots so you can inspect and edit config/layout/theme/plugin alias files.",
+  {
+    max_entries: z
+      .number()
+      .int()
+      .min(1)
+      .max(1000)
+      .optional()
+      .describe("Maximum number of files/directories to return (default 300)"),
+    include_hidden: z
+      .boolean()
+      .optional()
+      .describe("Include dotfiles and dot-directories"),
+  },
+  async (args) => {
+    const info = await getZellijConfigInfo();
+    const roots = getZellijConfigRoots(info);
+    const maxEntries = args.max_entries ?? 300;
+    const includeHidden = args.include_hidden ?? false;
+    const seenAbsPaths = new Set<string>();
+    let remainingEntries = maxEntries;
+
+    const lines: string[] = [];
+    for (const root of roots) {
+      lines.push(`ROOT ${root}`);
+      if (remainingEntries <= 0) {
+        lines.push("(entry budget exhausted)");
+        lines.push("");
+        continue;
+      }
+
+      const entries = await listFilesUnder(
+        root,
+        remainingEntries,
+        includeHidden,
+        seenAbsPaths
+      );
+      if (entries.length === 0) {
+        lines.push("(no readable entries)");
+      } else {
+        lines.push(...entries.map((entry) => `- ${entry}`));
+      }
+      remainingEntries -= entries.length;
+      lines.push("");
+    }
+
+    lines.push(`TOTAL_RETURNED ${maxEntries - remainingEntries}`);
+    if (remainingEntries <= 0) {
+      lines.push(`ENTRY_BUDGET_EXHAUSTED max_entries=${maxEntries}`);
+    }
+
+    return {
+      content: [{ type: "text", text: lines.join("\n").trim() }],
+    };
+  }
+);
+
+const readZellijConfigFileTool = tool(
+  "read_zellij_config_file",
+  "Read a zellij config-related file from the active config roots. Paths can be relative to config dir or absolute.",
+  {
+    path: z
+      .string()
+      .optional()
+      .describe("Relative path from config dir or absolute path (default: active config.kdl)"),
+    max_bytes: z
+      .number()
+      .int()
+      .min(512)
+      .max(1_000_000)
+      .optional()
+      .describe("Max UTF-8 bytes to return before truncation (default 200000)"),
+  },
+  async (args) => {
+    const info = await getZellijConfigInfo();
+    const filePath = resolveZellijConfigPath(info, args.path);
+    const bytes = await fs.readFile(filePath);
+    const byteLength = bytes.length;
+    const maxBytes = args.max_bytes ?? 200_000;
+    const truncated = truncateUtf8ToBytes(bytes, maxBytes);
+
+    const header = [
+      `PATH ${filePath}`,
+      `BYTES ${byteLength}`,
+      `RETURNED_BYTES ${truncated.returnedBytes}`,
+      truncated.truncated ? `TRUNCATED true (max_bytes=${maxBytes})` : "TRUNCATED false",
+      "",
+    ].join("\n");
+
+    return {
+      content: [{ type: "text", text: `${header}${truncated.text}` }],
+    };
+  }
+);
+
+const writeZellijConfigFileTool = tool(
+  "write_zellij_config_file",
+  "Write full file content to a zellij config-related file (config, layouts, themes, plugin aliases, etc).",
+  {
+    path: z
+      .string()
+      .optional()
+      .describe("Relative path from config dir or absolute path (default: active config.kdl)"),
+    content: z.string().describe("Full file content to write"),
+    create_backup: z
+      .boolean()
+      .optional()
+      .describe("Create timestamped .bak copy first if file exists (default true)"),
+  },
+  async (args) => {
+    const info = await getZellijConfigInfo();
+    const filePath = resolveZellijConfigPath(info, args.path);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const backup = args.create_backup === false ? undefined : await backupFileIfExists(filePath);
+    await fs.writeFile(filePath, args.content, "utf8");
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: backup
+            ? `Wrote ${filePath}\nBackup: ${backup}`
+            : `Wrote ${filePath}`,
+        },
+      ],
+    };
+  }
+);
+
+const editZellijConfigFileTool = tool(
+  "edit_zellij_config_file",
+  "Edit a zellij config file via exact text replacement (safe deterministic patching).",
+  {
+    path: z
+      .string()
+      .optional()
+      .describe("Relative path from config dir or absolute path (default: active config.kdl)"),
+    old_string: z.string().describe("Exact string to replace"),
+    new_string: z.string().describe("Replacement string (must differ)"),
+    replace_all: z
+      .boolean()
+      .optional()
+      .describe("Replace all matches instead of first match"),
+    create_backup: z
+      .boolean()
+      .optional()
+      .describe("Create timestamped .bak copy first if file exists (default true)"),
+  },
+  async (args) => {
+    if (args.old_string === args.new_string) {
+      return {
+        content: [{ type: "text", text: "old_string and new_string must differ" }],
+        isError: true,
+      };
+    }
+
+    const info = await getZellijConfigInfo();
+    const filePath = resolveZellijConfigPath(info, args.path);
+    const content = await fs.readFile(filePath, "utf8");
+
+    if (!content.includes(args.old_string)) {
+      return {
+        content: [{ type: "text", text: `old_string not found in ${filePath}` }],
+        isError: true,
+      };
+    }
+
+    const occurrences = content.split(args.old_string).length - 1;
+    const nextContent = args.replace_all
+      ? content.split(args.old_string).join(args.new_string)
+      : content.replace(args.old_string, args.new_string);
+
+    const backup = args.create_backup === false ? undefined : await backupFileIfExists(filePath);
+    await fs.writeFile(filePath, nextContent, "utf8");
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: [
+            `Edited ${filePath}`,
+            `Replacements: ${args.replace_all ? occurrences : 1}`,
+            backup ? `Backup: ${backup}` : undefined,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        },
+      ],
+    };
+  }
+);
+
+const getZellijKnowledgeTool = tool(
+  "get_zellij_knowledge",
+  "Return Jelly J's bundled concise-yet-comprehensive Zellij reference compiled from zellij and zellij.dev docs.",
+  {},
+  async () => {
+    const info = await getZellijConfigInfo();
+    const installedVersion = await getInstalledZellijVersion();
+
+    const headerLines = [
+      `LOCAL_ZELLIJ_VERSION ${installedVersion ?? "unknown"}`,
+      info.zellijVersion
+        ? `SETUP_CHECK_ZELLIJ_VERSION ${info.zellijVersion}`
+        : undefined,
+      installedVersion &&
+      info.zellijVersion &&
+      installedVersion !== info.zellijVersion
+        ? "VERSION_WARNING Installed zellij version differs from setup --check output."
+        : undefined,
+      "",
+    ].filter((line): line is string => Boolean(line));
+
+    return {
+      content: [{ type: "text", text: `${headerLines.join("\n")}${ZELLIJ_KNOWLEDGE_GUIDE}` }],
+    };
+  }
+);
+
+const searchZellijKnowledgeTool = tool(
+  "search_zellij_knowledge",
+  "Search Jelly J's bundled Zellij reference by topic and return the most relevant sections.",
+  {
+    query: z.string().describe("Search query, eg. 'layout cwd precedence'"),
+    max_sections: z
+      .number()
+      .int()
+      .min(1)
+      .max(12)
+      .optional()
+      .describe("Maximum sections to return (default 6)"),
+  },
+  async (args) => {
+    return {
+      content: [
+        {
+          type: "text",
+          text: searchZellijKnowledge(args.query, args.max_sections ?? 6),
+        },
+      ],
+    };
+  }
+);
+
 // --- Escape hatch ---
 
 const zellijActionTool = tool(
@@ -419,6 +818,14 @@ export const zellijMcpServer = createSdkMcpServer({
     toggleFullscreen,
     changeFloatingPaneCoordinates,
     writeToPane,
+    // Config and docs
+    getZellijConfigInfoTool,
+    listZellijConfigFilesTool,
+    readZellijConfigFileTool,
+    writeZellijConfigFileTool,
+    editZellijConfigFileTool,
+    getZellijKnowledgeTool,
+    searchZellijKnowledgeTool,
     // Escape hatch
     zellijActionTool,
   ],

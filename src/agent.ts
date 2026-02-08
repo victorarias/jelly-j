@@ -6,10 +6,22 @@ import {
   type SDKAssistantMessage,
   type SDKResultError,
   type Options,
+  type PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
+import { createInterface } from "node:readline/promises";
+import os from "node:os";
+import path from "node:path";
+import { stdin as processStdin, stdout as processStdout } from "node:process";
 import { zellijMcpServer } from "./tools.js";
+import {
+  getZellijAdditionalDirectories,
+  getZellijConfigInfo,
+  getZellijConfigRoots,
+  isInsidePath,
+  type ZellijConfigInfo,
+} from "./zellijConfig.js";
 
-const SYSTEM_PROMPT = `You are Jelly J, a friendly Zellij workspace assistant. You live in a
+const BASE_SYSTEM_PROMPT = `You are Jelly J, a friendly Zellij workspace assistant. You live in a
 floating pane and help the user organize their terminal workspace.
 
 Your personality:
@@ -25,11 +37,12 @@ Output format:
 - Emojis are fine sparingly.
 
 How you work:
-1. ALWAYS start by checking the current workspace state (get_layout, list_tabs)
-   before making any changes
-2. Explain briefly what you're about to do, then do it
-3. After changes, verify the result
-4. When relevant, mention the Zellij keybinding for what you just did
+1. For LIVE session changes, ALWAYS start by checking current workspace state
+   (get_layout and list_tabs) before acting
+2. For CONFIG file changes, inspect config files first, then patch surgically
+3. Explain briefly what you're about to do, then do it
+4. After changes, verify the result
+5. When relevant, mention the Zellij keybinding for what you just did
    (so the user learns over time)
 
 You can:
@@ -37,10 +50,30 @@ You can:
 - Create panes (tiled, floating, pinned, stacked) running any command
 - Move and resize panes within a tab
 - Help the user find things in their workspace
+- Read/edit Zellij config/layout/theme/plugin files
+- Use full Claude Code tools (Read/Edit/Write/Grep/Glob/Bash/Task/etc.) when helpful
+- Answer Zellij conceptual questions using search_zellij_knowledge/get_zellij_knowledge
 
 For complex reorganizations (like "sort everything by project"), work
 step by step: understand the current state, make a plan, execute it,
 then confirm the result.`;
+
+function buildSystemPrompt(configInfo: ZellijConfigInfo): string {
+  return `${BASE_SYSTEM_PROMPT}
+
+Local zellij config context:
+- Active config dir: ${configInfo.configDir}
+- Active config file: ${configInfo.configFile}
+- Active layout dir: ${configInfo.layoutDir}
+- Discovery source: ${configInfo.source}
+
+If you are unsure about Zellij behavior details, call search_zellij_knowledge before answering.
+If asked to change config, use config-aware tools first (get_zellij_config_info, list/read/edit/write_zellij_config_file).
+
+Permission policy in this session:
+- Bash commands require explicit user approval
+- File modifications outside Zellij config roots require explicit user approval`;
+}
 
 export type ChatModel = "claude-opus-4-6" | "claude-haiku-4-5-20251001";
 
@@ -53,7 +86,162 @@ export type ChatEvents = {
   onText?: (text: string) => void;
   onToolUse?: (event: ToolUseEvent) => void;
   onResultError?: (subtype: string, errors: string[]) => void;
+  onPermissionRequest?: (toolName: string, reason: string) => void;
 };
+
+const BASH_TOOL_NAMES = new Set(["Bash"]);
+const WRITE_TOOL_NAMES = new Set([
+  "FileEdit",
+  "FileWrite",
+  "NotebookEdit",
+  "Edit",
+  "Write",
+  "MultiEdit",
+]);
+const WRITE_TOOL_NAME_PATTERN = /(Edit|Write)/;
+
+function inputPathForTool(toolName: string, input: Record<string, unknown>): string | undefined {
+  if (toolName === "NotebookEdit") {
+    const notebookPath = input.notebook_path;
+    return typeof notebookPath === "string" ? notebookPath : undefined;
+  }
+
+  const filePath = input.file_path;
+  return typeof filePath === "string" ? filePath : undefined;
+}
+
+function isWriteTool(toolName: string): boolean {
+  return WRITE_TOOL_NAMES.has(toolName) || WRITE_TOOL_NAME_PATTERN.test(toolName);
+}
+
+async function askPermissionPrompt(
+  message: string,
+  allowAllLabel: string
+): Promise<"yes" | "no" | "all"> {
+  if (!processStdin.isTTY || !processStdout.isTTY) {
+    return "no";
+  }
+
+  const rl = createInterface({
+    input: processStdin,
+    output: processStdout,
+  });
+
+  try {
+    while (true) {
+      const answer = (
+        await rl.question(
+          `${message}${os.EOL}Allow? [y]es / [n]o / [a]ll (${allowAllLabel}): `
+        )
+      )
+        .trim()
+        .toLowerCase();
+      if (answer === "y" || answer === "yes") return "yes";
+      if (answer === "n" || answer === "no" || answer === "") return "no";
+      if (answer === "a" || answer === "all") return "all";
+      processStdout.write("Please answer y, n, or a." + os.EOL);
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+function buildPermissionPolicy(
+  configInfo: ZellijConfigInfo,
+  events: ChatEvents
+): NonNullable<Options["canUseTool"]> {
+  const configRoots = getZellijConfigRoots(configInfo).map((root) => path.resolve(root));
+  let allowAllBash = false;
+  let allowAllOutsideConfigWrites = false;
+  const approvedOutsideConfigWritePaths = new Set<string>();
+
+  return async (toolName, input, callbackOptions): Promise<PermissionResult> => {
+    const toolInput =
+      typeof input === "object" && input !== null
+        ? (input as Record<string, unknown>)
+        : {};
+
+    if (BASH_TOOL_NAMES.has(toolName)) {
+      if (allowAllBash) return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
+
+      const command =
+        typeof toolInput.command === "string" ? toolInput.command : "(unknown)";
+      events.onPermissionRequest?.(toolName, "bash command");
+      const decision = await askPermissionPrompt(
+        [
+          "",
+          "Jelly J requests Bash execution.",
+          `Tool: ${toolName}`,
+          `Command: ${command}`,
+        ].join(os.EOL),
+        "all bash this run"
+      );
+
+      if (decision === "all") {
+        allowAllBash = true;
+        return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
+      }
+      if (decision === "yes") {
+        return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
+      }
+      return {
+        behavior: "deny",
+        message:
+          "Bash execution denied by user. Ask the user for approval before retrying.",
+        toolUseID: callbackOptions.toolUseID,
+      };
+    }
+
+    if (!isWriteTool(toolName)) {
+      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
+    }
+
+    const maybePath = inputPathForTool(toolName, toolInput);
+    if (!maybePath) {
+      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
+    }
+
+    const resolvedPath = path.resolve(maybePath);
+    const insideConfigRoots = configRoots.some((root) => isInsidePath(resolvedPath, root));
+
+    if (insideConfigRoots) {
+      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
+    }
+
+    if (allowAllOutsideConfigWrites || approvedOutsideConfigWritePaths.has(resolvedPath)) {
+      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
+    }
+
+    events.onPermissionRequest?.(toolName, "write outside zellij config roots");
+    const decision = await askPermissionPrompt(
+      [
+        "",
+        "Jelly J requests file modification outside Zellij config roots.",
+        `Tool: ${toolName}`,
+        `Path: ${resolvedPath}`,
+        `Allowed roots: ${configRoots.join(", ")}`,
+      ].join(os.EOL),
+      "all outside-config writes this run"
+    );
+
+    if (decision === "all") {
+      allowAllOutsideConfigWrites = true;
+      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
+    }
+
+    if (decision === "yes") {
+      approvedOutsideConfigWritePaths.add(resolvedPath);
+      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
+    }
+
+    return {
+      behavior: "deny",
+      message:
+        "File modification outside zellij config roots denied by user. Ask for approval before retrying.",
+      toolUseID: callbackOptions.toolUseID,
+    };
+  };
+}
 
 /**
  * Send a user message and stream assistant response via event callbacks.
@@ -73,6 +261,10 @@ export async function chat(
   events: ChatEvents = {}
 ): Promise<{ sessionId?: string }> {
   let newSessionId: string | undefined;
+  const zellijConfigInfo = await getZellijConfigInfo();
+  const additionalDirectories = await getZellijAdditionalDirectories(
+    zellijConfigInfo
+  );
 
   // SDK MCP servers require streaming input mode (async generator).
   // session_id is required by the type but only meaningful for resumed sessions.
@@ -87,14 +279,19 @@ export async function chat(
   }
 
   const options: Options = {
-    systemPrompt: SYSTEM_PROMPT,
+    systemPrompt: buildSystemPrompt(zellijConfigInfo),
     model,
+    tools: { type: "preset", preset: "claude_code" },
     mcpServers: { zellij: zellijMcpServer },
-    allowedTools: ["mcp__zellij__*"],
     maxTurns: 20,
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
+    canUseTool: buildPermissionPolicy(zellijConfigInfo, events),
   };
+
+  if (additionalDirectories.length > 0) {
+    options.additionalDirectories = additionalDirectories;
+  }
 
   if (sessionId) {
     options.resume = sessionId;
