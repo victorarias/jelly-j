@@ -8,13 +8,13 @@ import {
   type Options,
 } from "@anthropic-ai/claude-agent-sdk";
 import os from "node:os";
-import path from "node:path";
 import { stdin as processStdin, stdout as processStdout } from "node:process";
 import { zellijMcpServer } from "./tools.js";
 import {
+  canonicalizePath,
+  getCanonicalZellijConfigRoots,
   getZellijAdditionalDirectories,
   getZellijConfigInfo,
-  getZellijConfigRoots,
   isInsidePath,
   type ZellijConfigInfo,
 } from "./zellijConfig.js";
@@ -161,7 +161,7 @@ function buildPermissionHooks(
   configInfo: ZellijConfigInfo,
   events: ChatEvents
 ): NonNullable<Options["hooks"]> {
-  const configRoots = getZellijConfigRoots(configInfo).map((root) => path.resolve(root));
+  const canonicalConfigRootsPromise = getCanonicalZellijConfigRoots(configInfo);
   let allowAllBash = false;
   let allowAllOutsideConfigWrites = false;
   const approvedOutsideConfigWritePaths = new Set<string>();
@@ -242,9 +242,12 @@ function buildPermissionHooks(
               return { continue: true };
             }
 
-            const resolvedPath = path.resolve(maybePath);
-            const insideConfigRoots = configRoots.some((root) =>
-              isInsidePath(resolvedPath, root)
+            const [canonicalConfigRoots, canonicalPath] = await Promise.all([
+              canonicalConfigRootsPromise,
+              canonicalizePath(maybePath),
+            ]);
+            const insideConfigRoots = canonicalConfigRoots.some((root) =>
+              isInsidePath(canonicalPath, root)
             );
 
             if (insideConfigRoots) {
@@ -253,7 +256,7 @@ function buildPermissionHooks(
 
             if (
               allowAllOutsideConfigWrites ||
-              approvedOutsideConfigWritePaths.has(resolvedPath)
+              approvedOutsideConfigWritePaths.has(canonicalPath)
             ) {
               return {
                 continue: true,
@@ -270,8 +273,8 @@ function buildPermissionHooks(
                 "",
                 "Jelly J requests file modification outside Zellij config roots.",
                 `Tool: ${toolName}`,
-                `Path: ${resolvedPath}`,
-                `Allowed roots: ${configRoots.join(", ")}`,
+                `Path: ${canonicalPath}`,
+                `Allowed roots: ${canonicalConfigRoots.join(", ")}`,
               ].join(os.EOL),
               "all outside-config writes this run"
             );
@@ -288,7 +291,7 @@ function buildPermissionHooks(
             }
 
             if (decision === "yes") {
-              approvedOutsideConfigWritePaths.add(resolvedPath);
+              approvedOutsideConfigWritePaths.add(canonicalPath);
               return {
                 continue: true,
                 hookSpecificOutput: {

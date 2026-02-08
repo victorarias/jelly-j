@@ -46,6 +46,35 @@ export function isInsidePath(targetPath: string, rootPath: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+export async function canonicalizePath(candidatePath: string): Promise<string> {
+  const resolvedPath = path.resolve(candidatePath);
+  let current = resolvedPath;
+  const unresolvedSuffix: string[] = [];
+
+  while (true) {
+    try {
+      const realCurrent = await fs.realpath(current);
+      if (unresolvedSuffix.length === 0) {
+        return realCurrent;
+      }
+      return path.resolve(realCurrent, ...unresolvedSuffix.reverse());
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err.code !== "ENOENT" && err.code !== "ENOTDIR") {
+        throw error;
+      }
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return resolvedPath;
+    }
+
+    unresolvedSuffix.push(path.basename(current));
+    current = parent;
+  }
+}
+
 async function pathIsDirectory(dirPath: string): Promise<boolean> {
   try {
     const stat = await fs.stat(dirPath);
@@ -174,6 +203,14 @@ export function getZellijConfigRoots(info: ZellijConfigInfo): string[] {
   return uniquePaths([info.configDir, path.dirname(info.configFile), info.layoutDir]);
 }
 
+export async function getCanonicalZellijConfigRoots(
+  info: ZellijConfigInfo
+): Promise<string[]> {
+  const roots = getZellijConfigRoots(info);
+  const canonicalRoots = await Promise.all(roots.map((root) => canonicalizePath(root)));
+  return uniquePaths(canonicalRoots);
+}
+
 export async function getZellijAdditionalDirectories(
   info: ZellijConfigInfo
 ): Promise<string[]> {
@@ -195,29 +232,36 @@ export async function getZellijAdditionalDirectories(
   return uniquePaths([...preferredRoots, ...existing]);
 }
 
-export function resolveZellijConfigPath(
+export async function resolveZellijConfigPath(
   info: ZellijConfigInfo,
   requestedPath: string | undefined
-): string {
-  if (!requestedPath || requestedPath.trim() === "") {
-    return path.resolve(info.configFile);
-  }
-
+): Promise<string> {
   const roots = getZellijConfigRoots(info);
   const primaryRoot = roots[0] ?? path.dirname(info.configFile);
-  const normalized = requestedPath.trim();
-  const resolvedPath = path.isAbsolute(normalized)
-    ? path.resolve(normalized)
-    : path.resolve(primaryRoot, normalized);
+  const normalized = requestedPath?.trim() ?? "";
+  const resolvedPath =
+    normalized === ""
+      ? path.resolve(info.configFile)
+      : path.isAbsolute(normalized)
+        ? path.resolve(normalized)
+        : path.resolve(primaryRoot, normalized);
 
-  const isAllowed = roots.some((root) => isInsidePath(resolvedPath, root));
-  if (!isAllowed && resolvedPath !== path.resolve(info.configFile)) {
+  const [canonicalResolvedPath, canonicalConfigFile, canonicalRoots] = await Promise.all([
+    canonicalizePath(resolvedPath),
+    canonicalizePath(info.configFile),
+    getCanonicalZellijConfigRoots(info),
+  ]);
+
+  const isAllowed = canonicalRoots.some((root) =>
+    isInsidePath(canonicalResolvedPath, root)
+  );
+  if (!isAllowed && canonicalResolvedPath !== canonicalConfigFile) {
     throw new Error(
-      `Refusing to access path outside zellij config roots: ${resolvedPath}`
+      `Refusing to access path outside zellij config roots: ${canonicalResolvedPath}`
     );
   }
 
-  return resolvedPath;
+  return canonicalResolvedPath;
 }
 
 export async function getInstalledZellijVersion(): Promise<string | undefined> {

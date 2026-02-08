@@ -604,7 +604,7 @@ const readZellijConfigFileTool = tool(
   },
   async (args) => {
     const info = await getZellijConfigInfo();
-    const filePath = resolveZellijConfigPath(info, args.path);
+    const filePath = await resolveZellijConfigPath(info, args.path);
     const bytes = await fs.readFile(filePath);
     const byteLength = bytes.length;
     const maxBytes = args.max_bytes ?? 200_000;
@@ -640,7 +640,7 @@ const writeZellijConfigFileTool = tool(
   },
   async (args) => {
     const info = await getZellijConfigInfo();
-    const filePath = resolveZellijConfigPath(info, args.path);
+    const filePath = await resolveZellijConfigPath(info, args.path);
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     const backup = args.create_backup === false ? undefined : await backupFileIfExists(filePath);
     await fs.writeFile(filePath, args.content, "utf8");
@@ -686,7 +686,7 @@ const editZellijConfigFileTool = tool(
     }
 
     const info = await getZellijConfigInfo();
-    const filePath = resolveZellijConfigPath(info, args.path);
+    const filePath = await resolveZellijConfigPath(info, args.path);
     const content = await fs.readFile(filePath, "utf8");
 
     if (!content.includes(args.old_string)) {
