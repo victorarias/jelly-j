@@ -12,12 +12,24 @@ const COLOR_CODES = {
   meta: "\x1b[34m",
 } as const;
 
-// 24-bit ANSI background inspired by pi-mono dark theme
-const TOOL_BG = "\x1b[48;2;40;40;50m";
-
 export type UiState = "idle" | "thinking" | "tool" | "error";
 
-type DisplayFn = (text: string) => void;
+export type TranscriptKind = "you" | "jj" | "tool" | "note" | "error";
+
+export type TranscriptEntry = {
+  kind: TranscriptKind;
+  text: string;
+};
+
+export type UiSnapshot = {
+  model: ModelAlias;
+  sessionId?: string;
+  state: UiState;
+  queueLength: number;
+  entries: TranscriptEntry[];
+  input: string;
+  cursor: number;
+};
 
 function colorize(text: string, color: keyof typeof COLOR_CODES): string {
   return `${COLOR_CODES[color]}${text}${ANSI_RESET}`;
@@ -27,125 +39,217 @@ function bold(text: string): string {
   return `${ANSI_BOLD}${text}${ANSI_RESET}`;
 }
 
-const INDENT = "  ";
-const DOT = colorize("·", "muted");
-
-// ── Startup banner ──
-
-const JELLYFISH = [
-  "      .~~~.",
-  "     ( ◠‿◠ )",
-  "      /|||\\",
-  "       |||",
-];
-
-export function renderWelcome(model: ModelAlias): string {
-  const jelly = JELLYFISH.map((l) => colorize(l, "info")).join("\n");
-  const name = bold(colorize("Jelly J", "info"));
-  const modelBadge = colorize(model, "meta");
-  const hints = colorize('/model to switch · "exit" to close', "muted");
-  return `\n${jelly}\n\n${INDENT}${name} ${DOT} ${modelBadge}\n${INDENT}${hints}\n`;
+function sanitizeText(text: string): string {
+  return text.replace(/\r/g, "").replace(/\t/g, "  ");
 }
 
-// ── Animated spinner (inspired by pi-mono Loader) ──
+function truncate(text: string, width: number): string {
+  if (width <= 0) return "";
+  if (text.length <= width) return text;
+  if (width === 1) return "…";
+  return `${text.slice(0, width - 1)}…`;
+}
 
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+function wrapText(text: string, width: number): string[] {
+  if (width <= 0) return [""];
 
-export class Spinner {
-  private currentFrame = 0;
-  private intervalId: NodeJS.Timeout | null = null;
+  const lines: string[] = [];
+  const paragraphs = sanitizeText(text).split("\n");
 
-  constructor(
-    private message: string,
-    private display: DisplayFn
-  ) {}
-
-  start(): void {
-    this.render();
-    this.intervalId = setInterval(() => {
-      this.currentFrame = (this.currentFrame + 1) % SPINNER_FRAMES.length;
-      this.render();
-    }, 80);
-  }
-
-  private render(): void {
-    const frame = colorize(SPINNER_FRAMES[this.currentFrame], "info");
-    const msg = colorize(this.message, "muted");
-    // \r returns cursor to start of line, \x1b[K clears to end
-    this.display(`\r${INDENT}${frame} ${msg}\x1b[K`);
-  }
-
-  stop(): void {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+  for (const paragraph of paragraphs) {
+    if (!paragraph.length) {
+      lines.push("");
+      continue;
     }
-    this.display(`\r\x1b[K`);
+
+    let remaining = paragraph;
+    while (remaining.length > width) {
+      let splitAt = remaining.lastIndexOf(" ", width);
+      if (splitAt <= 0) splitAt = width;
+      lines.push(remaining.slice(0, splitAt).trimEnd());
+      remaining = remaining.slice(splitAt).trimStart();
+    }
+    lines.push(remaining);
   }
 
-  isRunning(): boolean {
-    return this.intervalId !== null;
+  return lines.length ? lines : [""];
+}
+
+function colorForKind(kind: TranscriptKind): keyof typeof COLOR_CODES {
+  switch (kind) {
+    case "you":
+      return "meta";
+    case "jj":
+      return "info";
+    case "tool":
+      return "muted";
+    case "note":
+      return "muted";
+    case "error":
+      return "error";
   }
 }
 
-// ── Transcript formatting ──
-
-function cleanToolName(name: string): string {
+export function cleanToolName(name: string): string {
   return name.replace(/^mcp__zellij__/, "");
 }
 
-export function printToolUse(rawName: string, display: DisplayFn): void {
-  const name = cleanToolName(rawName);
-  const fg = COLOR_CODES.muted;
-  display(`${INDENT}${TOOL_BG}${fg} ◦ ${name} ${ANSI_RESET}\n`);
+export function createWelcomeEntries(model: ModelAlias): TranscriptEntry[] {
+  return [
+    {
+      kind: "note",
+      text: `Jelly J ready. model: ${model}`,
+    },
+    {
+      kind: "note",
+      text: 'Type /model to switch models. Type "exit" to close.',
+    },
+  ];
 }
 
-export function printNote(message: string, display: DisplayFn): void {
-  display(`${INDENT}${colorize(message, "muted")}\n`);
-}
+export class DifferentialRenderer {
+  private running = false;
+  private previousLines: string[] = [];
+  private previousWidth = 0;
+  private previousHeight = 0;
+  private inputScroll = 0;
 
-export function printError(message: string, display: DisplayFn): void {
-  display(`${INDENT}${colorize(message, "error")}\n`);
-}
-
-// ── End-of-turn separator ──
-
-export function renderTurnEnd(model: ModelAlias): string {
-  const label = colorize(model, "muted");
-  const line = colorize("───────", "muted");
-  return `\n${INDENT}${line} ${label}\n`;
-}
-
-// ── Stream writer for assistant text ──
-
-export class StreamWriter {
-  private atLineStart = true;
-
-  constructor(private readonly display: DisplayFn) {}
-
-  write(text: string): void {
-    for (const char of text) {
-      if (this.atLineStart) {
-        if (char === "\n") {
-          this.display("\n");
-          continue;
-        }
-        this.display(INDENT);
-        this.atLineStart = false;
-      }
-
-      this.display(char);
-
-      if (char === "\n") {
-        this.atLineStart = true;
-      }
-    }
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    process.stdout.write("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l");
   }
 
-  flushLine(): void {
-    if (!this.atLineStart) {
-      this.display("\n");
-      this.atLineStart = true;
+  stop(): void {
+    if (!this.running) return;
+    this.running = false;
+    this.previousLines = [];
+    process.stdout.write("\x1b[?25h\x1b[?1049l");
+  }
+
+  render(snapshot: UiSnapshot): void {
+    if (!this.running) return;
+
+    const width = Math.max(20, process.stdout.columns || 80);
+    const height = Math.max(8, process.stdout.rows || 24);
+
+    const frame = this.buildFrame(snapshot, width, height);
+    const needsFullRedraw =
+      this.previousLines.length === 0 ||
+      this.previousWidth !== width ||
+      this.previousHeight !== height ||
+      this.previousLines.length !== frame.lines.length;
+
+    let buffer = "\x1b[?2026h\x1b[?25l";
+
+    if (needsFullRedraw) {
+      buffer += "\x1b[2J";
+      for (let row = 0; row < frame.lines.length; row++) {
+        buffer += `\x1b[${row + 1};1H\x1b[2K${frame.lines[row]}`;
+      }
+    } else {
+      for (let row = 0; row < frame.lines.length; row++) {
+        if (frame.lines[row] === this.previousLines[row]) continue;
+        buffer += `\x1b[${row + 1};1H\x1b[2K${frame.lines[row]}`;
+      }
     }
+
+    buffer += `\x1b[${frame.cursorRow + 1};${frame.cursorCol + 1}H\x1b[?25h\x1b[?2026l`;
+    process.stdout.write(buffer);
+
+    this.previousLines = frame.lines;
+    this.previousWidth = width;
+    this.previousHeight = height;
+  }
+
+  private buildFrame(
+    snapshot: UiSnapshot,
+    width: number,
+    height: number
+  ): { lines: string[]; cursorRow: number; cursorCol: number } {
+    const sessionShort = snapshot.sessionId ? snapshot.sessionId.slice(0, 8) : "new";
+    const headerPlain = `Jelly J  model:${snapshot.model}  session:${sessionShort}  state:${snapshot.state}`;
+    const header = `${bold(colorize(truncate(headerPlain, width), "info"))}`;
+    const separator = colorize("─".repeat(width), "muted");
+
+    const transcriptHeight = Math.max(1, height - 5);
+    const transcriptLines = this.renderTranscript(snapshot.entries, width);
+    const visibleTranscript = transcriptLines.slice(-transcriptHeight);
+    while (visibleTranscript.length < transcriptHeight) {
+      visibleTranscript.unshift("");
+    }
+
+    const inputSeparator = colorize("─".repeat(width), "muted");
+    const inputLine = this.renderInputLine(snapshot.input, snapshot.cursor, width);
+    const hintPlain =
+      snapshot.queueLength > 0
+        ? `queued: ${snapshot.queueLength} | Enter send | Ctrl+C exit`
+        : "Enter send | /model | Ctrl+C exit";
+    const hint = colorize(truncate(hintPlain, width), "muted");
+
+    const lines = [header, separator, ...visibleTranscript, inputSeparator, inputLine.line, hint];
+
+    return {
+      lines,
+      cursorRow: lines.length - 2,
+      cursorCol: inputLine.cursorCol,
+    };
+  }
+
+  private renderTranscript(entries: TranscriptEntry[], width: number): string[] {
+    if (entries.length === 0) {
+      return [colorize("note  say hi and I will organize your workspace", "muted")];
+    }
+
+    const lines: string[] = [];
+    const labelWidth = 5;
+    const textWidth = Math.max(1, width - labelWidth - 1);
+
+    for (const entry of entries) {
+      const wrapped = wrapText(entry.text, textWidth);
+      const rawLabel = entry.kind.padEnd(labelWidth, " ");
+      const label = colorize(rawLabel, colorForKind(entry.kind));
+
+      wrapped.forEach((line, index) => {
+        const prefix = index === 0 ? label : " ".repeat(labelWidth);
+        lines.push(`${prefix} ${truncate(line, textWidth)}`);
+      });
+    }
+
+    return lines;
+  }
+
+  private renderInputLine(
+    input: string,
+    cursor: number,
+    width: number
+  ): { line: string; cursorCol: number } {
+    const prompt = colorize("> ", "info");
+    const plainPrompt = "> ";
+    const safeInput = sanitizeText(input).replace(/\n/g, " ");
+    const clampedCursor = Math.max(0, Math.min(cursor, safeInput.length));
+
+    const available = Math.max(1, width - plainPrompt.length);
+
+    if (clampedCursor < this.inputScroll) {
+      this.inputScroll = clampedCursor;
+    }
+    if (clampedCursor >= this.inputScroll + available) {
+      this.inputScroll = clampedCursor - available + 1;
+    }
+    if (safeInput.length <= available) {
+      this.inputScroll = 0;
+    } else {
+      this.inputScroll = Math.max(0, Math.min(this.inputScroll, safeInput.length - available));
+    }
+
+    const visibleInput = safeInput.slice(this.inputScroll, this.inputScroll + available);
+    const padded = visibleInput.padEnd(available, " ");
+    const line = `${prompt}${padded}`;
+
+    const inputCursor = Math.max(0, clampedCursor - this.inputScroll);
+    const cursorCol = Math.min(width - 1, plainPrompt.length + inputCursor);
+
+    return { line, cursorCol };
   }
 }

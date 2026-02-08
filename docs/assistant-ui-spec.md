@@ -1,7 +1,7 @@
 # Jelly J Assistant UI Spec (v1)
 
 Date: 2026-02-08
-Scope: terminal REPL UI only (`src/index.ts` path), one slash command (`/model`), one dark theme.
+Scope: differential-rendered terminal UI (`src/index.ts` path), one slash command (`/model`), one dark theme.
 
 ## 1) Goals
 
@@ -60,7 +60,7 @@ Three persistent zones in the REPL:
 - Tool call lines
 - System notices (model changed, errors)
 
-3. Input line (readline prompt)
+3. Input line (custom raw-key input editor)
 - Prompt symbol: `❯`
 - Slash command entry and normal chat input
 
@@ -154,20 +154,24 @@ Fixed prefixes for scanability:
 
 1. `src/ui.ts`
 - ANSI helpers and semantic color functions
-- header renderer and state transitions
-- formatted line writer for transcript prefixes
+- differential line renderer (only changed rows are repainted)
+- bottom-anchored prompt box renderer and transcript layout
 
 2. `src/commands.ts`
 - parse slash commands
 - `/model` execution and validation
 
+3. `src/agent-session.ts`
+- queued, event-driven agent session orchestration
+- model/session state and streaming event fanout to UI
+
 ### 8.2 Changes to Existing Files
 
 1. `src/index.ts`
 - maintain `currentModel` in process state (default `opus`)
-- route `/model` input before `chat()`
-- render header initially and on state changes
-- emit prefixed user lines into transcript
+- route `/model` input before enqueueing prompts
+- handle raw keyboard input/history and keep prompt anchored at bottom
+- subscribe to agent-session events and update transcript
 
 2. `src/agent.ts`
 - accept model override in `chat(...)`
