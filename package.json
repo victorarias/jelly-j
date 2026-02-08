@@ -30,13 +30,17 @@
     "start": "node --import tsx src/index.ts",
     "build": "tsup",
     "prepublishOnly": "npm run build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:harness:cli": "node --import tsx tests/e2e/alt-j-cli-harness.ts",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.37",
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/node": "^22.0.0",
     "tsup": "^8.5.1",
     "tsx": "^4.19.0",
