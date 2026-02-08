@@ -1,5 +1,5 @@
 import { emitKeypressEvents } from "node:readline";
-import { AgentSession } from "./agent-session.js";
+import { AgentSession, type AgentSessionEvent } from "./agent-session.js";
 import {
   handleSlashCommand,
   type ModelAlias,
@@ -41,6 +41,7 @@ async function main(): Promise<void> {
   let queueLength = 0;
   let sessionId: string | undefined;
   const entries: TranscriptEntry[] = createWelcomeEntries(model);
+  let transcriptScroll = 0;
 
   let input = "";
   let cursor = 0;
@@ -51,6 +52,8 @@ async function main(): Promise<void> {
   let historyDraft = "";
 
   let shuttingDown = false;
+  let session: AgentSession | undefined;
+  let unsubscribe = (): void => {};
 
   const render = (): void => {
     renderer.render({
@@ -59,13 +62,18 @@ async function main(): Promise<void> {
       state,
       queueLength,
       entries,
+      transcriptScroll,
       input,
       cursor,
     });
   };
+  const animationInterval = setInterval(() => {
+    if (state === "thinking" || state === "tool") {
+      render();
+    }
+  }, 80);
 
-  const session = new AgentSession(model);
-  const unsubscribe = session.subscribe((event) => {
+  const onSessionEvent = (event: AgentSessionEvent): void => {
     switch (event.type) {
       case "state":
         model = event.model;
@@ -115,15 +123,39 @@ async function main(): Promise<void> {
         break;
     }
     render();
-  });
+  };
+
+  const startFreshSession = (note?: string): void => {
+    session?.stop();
+    unsubscribe();
+
+    sessionId = undefined;
+    state = "idle";
+    busy = false;
+    queueLength = 0;
+    activeAssistantIndex = undefined;
+    transcriptScroll = 0;
+
+    entries.splice(0, entries.length, ...createWelcomeEntries(model));
+    if (note) {
+      entries.push({ kind: "note", text: note });
+    }
+
+    session = new AgentSession(model);
+    unsubscribe = session.subscribe(onSessionEvent);
+    render();
+  };
+
+  startFreshSession();
 
   const shutdown = (message?: string): void => {
     if (shuttingDown) return;
     shuttingDown = true;
 
-    session.stop();
+    session?.stop();
     unsubscribe();
     stopHeartbeat();
+    clearInterval(animationInterval);
 
     process.stdout.off("resize", render);
     process.stdin.off("keypress", onKeypress);
@@ -145,6 +177,7 @@ async function main(): Promise<void> {
 
     input = "";
     cursor = 0;
+    transcriptScroll = 0;
     historyIndex = -1;
     historyDraft = "";
 
@@ -153,7 +186,11 @@ async function main(): Promise<void> {
     if (!message.length) return;
 
     if (isExitCommand(message)) {
-      shutdown("See you!");
+      entries.push({
+        kind: "note",
+        text: "Exit is disabled in persistent mode. Agent stays running.",
+      });
+      render();
       return;
     }
 
@@ -164,16 +201,20 @@ async function main(): Promise<void> {
     const commandResult = handleSlashCommand(message, model);
     if (commandResult.handled) {
       model = commandResult.nextModel;
-      session.setModel(model);
-      entries.push({
-        kind: commandResult.isError ? "error" : "note",
-        text: commandResult.message,
-      });
-      render();
+      if (commandResult.action === "new_session" && !commandResult.isError) {
+        startFreshSession(commandResult.message);
+      } else {
+        session?.setModel(model);
+        entries.push({
+          kind: commandResult.isError ? "error" : "note",
+          text: commandResult.message,
+        });
+        render();
+      }
       return;
     }
 
-    session.enqueue(message);
+    session?.enqueue(message);
   };
 
   const insertText = (text: string): void => {
@@ -181,6 +222,16 @@ async function main(): Promise<void> {
     if (!safe.length) return;
     input = `${input.slice(0, cursor)}${safe}${input.slice(cursor)}`;
     cursor += safe.length;
+  };
+
+  const scrollTranscript = (direction: "up" | "down"): void => {
+    const viewportLines = Math.max(1, (process.stdout.rows || 24) - 5);
+    const step = Math.max(1, Math.floor(viewportLines * 0.8));
+    if (direction === "up") {
+      transcriptScroll += step;
+    } else {
+      transcriptScroll = Math.max(0, transcriptScroll - step);
+    }
   };
 
   const selectHistory = (delta: -1 | 1): void => {
@@ -203,17 +254,37 @@ async function main(): Promise<void> {
 
   const onKeypress = (str: string, key: Keypress): void => {
     if (key.ctrl && key.name === "c") {
-      shutdown();
+      entries.push({
+        kind: "note",
+        text: "Ctrl+C captured. Agent stays running.",
+      });
+      render();
       return;
     }
 
     if (key.ctrl && key.name === "d" && input.length === 0) {
-      shutdown();
+      entries.push({
+        kind: "note",
+        text: "Ctrl+D captured. Agent stays running.",
+      });
+      render();
       return;
     }
 
     if (key.name === "return" || key.name === "enter") {
       submitInput();
+      return;
+    }
+
+    if (key.name === "pageup") {
+      scrollTranscript("up");
+      render();
+      return;
+    }
+
+    if (key.name === "pagedown") {
+      scrollTranscript("down");
+      render();
       return;
     }
 
@@ -294,7 +365,13 @@ async function main(): Promise<void> {
 
   process.stdout.on("resize", render);
 
-  process.on("SIGINT", () => shutdown());
+  process.on("SIGINT", () => {
+    entries.push({
+      kind: "note",
+      text: "SIGINT captured. Agent stays running.",
+    });
+    render();
+  });
   process.on("SIGTERM", () => shutdown());
 
   startHeartbeat();

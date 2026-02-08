@@ -14,6 +14,7 @@ export type SlashCommandResult =
       nextModel: ModelAlias;
       message: string;
       isError: boolean;
+      action: "none" | "new_session";
     };
 
 export function modelIdForAlias(alias: ModelAlias): ChatModel {
@@ -37,7 +38,28 @@ export function handleSlashCommand(
       handled: true,
       nextModel: currentModel,
       isError: true,
-      message: "empty command. use /model or /model <opus|haiku>",
+      action: "none",
+      message: "empty command. use /model, /model <opus|haiku>, or /new",
+    };
+  }
+
+  if (command === "new") {
+    if (args.length > 0) {
+      return {
+        handled: true,
+        nextModel: currentModel,
+        isError: true,
+        action: "none",
+        message: "usage: /new",
+      };
+    }
+
+    return {
+      handled: true,
+      nextModel: currentModel,
+      isError: false,
+      action: "new_session",
+      message: "started fresh session",
     };
   }
 
@@ -46,7 +68,8 @@ export function handleSlashCommand(
       handled: true,
       nextModel: currentModel,
       isError: true,
-      message: `unknown command: /${command}. only /model is supported`,
+      action: "none",
+      message: `unknown command: /${command}. supported: /model, /new`,
     };
   }
 
@@ -55,6 +78,7 @@ export function handleSlashCommand(
       handled: true,
       nextModel: currentModel,
       isError: false,
+      action: "none",
       message: `model current: ${currentModel} (${modelIdForAlias(currentModel)}) | available: opus, haiku`,
     };
   }
@@ -64,6 +88,7 @@ export function handleSlashCommand(
       handled: true,
       nextModel: currentModel,
       isError: true,
+      action: "none",
       message: "usage: /model <opus|haiku>",
     };
   }
@@ -74,6 +99,7 @@ export function handleSlashCommand(
       handled: true,
       nextModel: currentModel,
       isError: true,
+      action: "none",
       message: `invalid model alias: ${args[0]}. valid aliases: opus, haiku`,
     };
   }
@@ -84,6 +110,7 @@ export function handleSlashCommand(
       handled: true,
       nextModel,
       isError: false,
+      action: "none",
       message: `model already set: ${nextModel} (${modelIdForAlias(nextModel)})`,
     };
   }
@@ -92,6 +119,7 @@ export function handleSlashCommand(
     handled: true,
     nextModel,
     isError: false,
+    action: "none",
     message: `model changed: ${nextModel} (${modelIdForAlias(nextModel)})`,
   };
 }

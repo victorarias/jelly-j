@@ -12,9 +12,13 @@ const COLOR_CODES = {
   meta: "\x1b[34m",
 } as const;
 
+const TOOL_BG = "\x1b[48;2;40;40;50m";
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const JELLYFISH = ["      .~~~.", "     ( ◠‿◠ )", "      /|||\\", "       |||"] as const;
+
 export type UiState = "idle" | "thinking" | "tool" | "error";
 
-export type TranscriptKind = "you" | "jj" | "tool" | "note" | "error";
+export type TranscriptKind = "you" | "jj" | "tool" | "note" | "error" | "banner";
 
 export type TranscriptEntry = {
   kind: TranscriptKind;
@@ -27,6 +31,7 @@ export type UiSnapshot = {
   state: UiState;
   queueLength: number;
   entries: TranscriptEntry[];
+  transcriptScroll: number;
   input: string;
   cursor: number;
 };
@@ -87,6 +92,21 @@ function colorForKind(kind: TranscriptKind): keyof typeof COLOR_CODES {
       return "muted";
     case "error":
       return "error";
+    case "banner":
+      return "info";
+  }
+}
+
+function colorForState(state: UiState): keyof typeof COLOR_CODES {
+  switch (state) {
+    case "idle":
+      return "muted";
+    case "thinking":
+      return "warn";
+    case "tool":
+      return "info";
+    case "error":
+      return "error";
   }
 }
 
@@ -95,14 +115,16 @@ export function cleanToolName(name: string): string {
 }
 
 export function createWelcomeEntries(model: ModelAlias): TranscriptEntry[] {
+  const banner = JELLYFISH.map((line) => ({ kind: "banner" as const, text: line }));
   return [
+    ...banner,
     {
       kind: "note",
-      text: `Jelly J ready. model: ${model}`,
+      text: `Jelly J ready · model ${model}`,
     },
     {
       kind: "note",
-      text: 'Type /model to switch models. Type "exit" to close.',
+      text: '/model switch · /new reset session · persistent mode',
     },
   ];
 }
@@ -168,13 +190,22 @@ export class DifferentialRenderer {
     height: number
   ): { lines: string[]; cursorRow: number; cursorCol: number } {
     const sessionShort = snapshot.sessionId ? snapshot.sessionId.slice(0, 8) : "new";
-    const headerPlain = `Jelly J  model:${snapshot.model}  session:${sessionShort}  state:${snapshot.state}`;
+    const spinner =
+      snapshot.state === "thinking" || snapshot.state === "tool"
+        ? `${SPINNER_FRAMES[Math.floor(Date.now() / 80) % SPINNER_FRAMES.length]} `
+        : "";
+    const stateText = `${spinner}${snapshot.state}`;
+    const headerPlain = `Jelly J  model:${snapshot.model}  session:${sessionShort}  state:${stateText}`;
     const header = `${bold(colorize(truncate(headerPlain, width), "info"))}`;
     const separator = colorize("─".repeat(width), "muted");
 
     const transcriptHeight = Math.max(1, height - 5);
     const transcriptLines = this.renderTranscript(snapshot.entries, width);
-    const visibleTranscript = transcriptLines.slice(-transcriptHeight);
+    const maxScroll = Math.max(0, transcriptLines.length - transcriptHeight);
+    const clampedScroll = Math.max(0, Math.min(snapshot.transcriptScroll, maxScroll));
+    const end = Math.max(0, transcriptLines.length - clampedScroll);
+    const start = Math.max(0, end - transcriptHeight);
+    const visibleTranscript = transcriptLines.slice(start, end);
     while (visibleTranscript.length < transcriptHeight) {
       visibleTranscript.unshift("");
     }
@@ -183,11 +214,16 @@ export class DifferentialRenderer {
     const inputLine = this.renderInputLine(snapshot.input, snapshot.cursor, width);
     const hintPlain =
       snapshot.queueLength > 0
-        ? `queued: ${snapshot.queueLength} | Enter send | Ctrl+C exit`
-        : "Enter send | /model | Ctrl+C exit";
-    const hint = colorize(truncate(hintPlain, width), "muted");
+        ? `queued: ${snapshot.queueLength} | PgUp/PgDn scroll | Enter send | Ctrl+C stays open`
+        : "PgUp/PgDn scroll | Enter send | /model /new | Ctrl+C stays open";
+    const statePlain = `state: ${stateText}`;
+    const composedHintPlain = `${hintPlain} | ${statePlain}`;
+    const hintLine =
+      composedHintPlain.length <= width
+        ? `${colorize(hintPlain, "muted")} ${colorize("|", "muted")} ${colorize(statePlain, colorForState(snapshot.state))}`
+        : colorize(truncate(hintPlain, width), "muted");
 
-    const lines = [header, separator, ...visibleTranscript, inputSeparator, inputLine.line, hint];
+    const lines = [header, separator, ...visibleTranscript, inputSeparator, inputLine.line, hintLine];
 
     return {
       lines,
@@ -206,6 +242,19 @@ export class DifferentialRenderer {
     const textWidth = Math.max(1, width - labelWidth - 1);
 
     for (const entry of entries) {
+      if (entry.kind === "banner") {
+        lines.push(colorize(truncate(entry.text, width), "info"));
+        continue;
+      }
+
+      if (entry.kind === "tool") {
+        const rawLabel = "tool ".padEnd(labelWidth, " ");
+        const label = colorize(rawLabel, colorForKind(entry.kind));
+        const toolText = truncate(`◦ ${entry.text}`, Math.max(1, textWidth - 2));
+        lines.push(`${label} ${TOOL_BG}${COLOR_CODES.muted} ${toolText} ${ANSI_RESET}`);
+        continue;
+      }
+
       const wrapped = wrapText(entry.text, textWidth);
       const rawLabel = entry.kind.padEnd(labelWidth, " ");
       const label = colorize(rawLabel, colorForKind(entry.kind));
