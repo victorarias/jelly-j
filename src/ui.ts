@@ -12,17 +12,10 @@ const COLOR_CODES = {
   meta: "\x1b[34m",
 } as const;
 
-const SPINNER_FRAMES = ["-", "\\", "|", "/"];
+// 24-bit ANSI background inspired by pi-mono dark theme
+const TOOL_BG = "\x1b[48;2;40;40;50m";
 
 export type UiState = "idle" | "thinking" | "tool" | "error";
-
-type TranscriptPrefix = "you" | "jj" | "tool" | "note" | "error";
-
-type HeaderContext = {
-  model: ModelAlias;
-  sessionId?: string;
-  state: UiState;
-};
 
 type DisplayFn = (text: string) => void;
 
@@ -34,77 +27,110 @@ function bold(text: string): string {
   return `${ANSI_BOLD}${text}${ANSI_RESET}`;
 }
 
-function padPrefix(prefix: TranscriptPrefix): string {
-  return prefix.padEnd(5, " ");
+const INDENT = "  ";
+const DOT = colorize("·", "muted");
+
+// ── Startup banner ──
+
+const JELLYFISH = [
+  "      .~~~.",
+  "     ( ◠‿◠ )",
+  "      /|||\\",
+  "       |||",
+];
+
+export function renderWelcome(model: ModelAlias): string {
+  const jelly = JELLYFISH.map((l) => colorize(l, "info")).join("\n");
+  const name = bold(colorize("Jelly J", "info"));
+  const modelBadge = colorize(model, "meta");
+  const hints = colorize('/model to switch · "exit" to close', "muted");
+  return `\n${jelly}\n\n${INDENT}${name} ${DOT} ${modelBadge}\n${INDENT}${hints}\n`;
 }
 
-function formatPrefix(prefix: TranscriptPrefix): string {
-  if (prefix === "error") return colorize(padPrefix(prefix), "error");
-  if (prefix === "note") return colorize(padPrefix(prefix), "muted");
-  if (prefix === "tool") return colorize(padPrefix(prefix), "muted");
-  if (prefix === "you") return colorize(padPrefix(prefix), "meta");
-  return colorize(padPrefix(prefix), "info");
-}
+// ── Animated spinner (inspired by pi-mono Loader) ──
 
-let spinnerIndex = 0;
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-function stateBadge(state: UiState): string {
-  if (state === "idle") return colorize("idle", "success");
-  if (state === "error") return colorize("error", "error");
+export class Spinner {
+  private currentFrame = 0;
+  private intervalId: NodeJS.Timeout | null = null;
 
-  spinnerIndex = (spinnerIndex + 1) % SPINNER_FRAMES.length;
-  const label = `${SPINNER_FRAMES[spinnerIndex]} ${state}`;
-  return colorize(label, "warn");
-}
+  constructor(
+    private message: string,
+    private display: DisplayFn
+  ) {}
 
-function shortSessionId(sessionId?: string): string {
-  if (!sessionId) return "new";
-  return sessionId.slice(0, 6);
-}
+  start(): void {
+    this.render();
+    this.intervalId = setInterval(() => {
+      this.currentFrame = (this.currentFrame + 1) % SPINNER_FRAMES.length;
+      this.render();
+    }, 80);
+  }
 
-export function renderHeader(ctx: HeaderContext): string {
-  const app = bold(colorize("Jelly J", "info"));
-  const modelLabel = `${colorize("model:", "muted")} ${colorize(ctx.model, "meta")}`;
-  const sessionLabel = `${colorize("session:", "muted")} ${colorize(shortSessionId(ctx.sessionId), "meta")}`;
-  const stateLabel = `${colorize("state:", "muted")} ${stateBadge(ctx.state)}`;
+  private render(): void {
+    const frame = colorize(SPINNER_FRAMES[this.currentFrame], "info");
+    const msg = colorize(this.message, "muted");
+    // \r returns cursor to start of line, \x1b[K clears to end
+    this.display(`\r${INDENT}${frame} ${msg}\x1b[K`);
+  }
 
-  return `${app}  ${modelLabel}  ${sessionLabel}  ${stateLabel}`;
-}
+  stop(): void {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+    this.display(`\r\x1b[K`);
+  }
 
-export function printTranscriptLine(
-  prefix: TranscriptPrefix,
-  message: string,
-  display: DisplayFn
-): void {
-  const lines = message.split("\n");
-  for (const line of lines) {
-    display(`${formatPrefix(prefix)} ${line}\n`);
+  isRunning(): boolean {
+    return this.intervalId !== null;
   }
 }
 
-export function formatToolUse(
-  name: string,
-  input: Record<string, unknown>
-): string {
-  const args = Object.entries(input)
-    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
-    .join(" ");
+// ── Transcript formatting ──
 
-  return args ? `${name} ${args}` : name;
+function cleanToolName(name: string): string {
+  return name.replace(/^mcp__zellij__/, "");
 }
 
-export class PrefixedStreamWriter {
+export function printToolUse(rawName: string, display: DisplayFn): void {
+  const name = cleanToolName(rawName);
+  const fg = COLOR_CODES.muted;
+  display(`${INDENT}${TOOL_BG}${fg} ◦ ${name} ${ANSI_RESET}\n`);
+}
+
+export function printNote(message: string, display: DisplayFn): void {
+  display(`${INDENT}${colorize(message, "muted")}\n`);
+}
+
+export function printError(message: string, display: DisplayFn): void {
+  display(`${INDENT}${colorize(message, "error")}\n`);
+}
+
+// ── End-of-turn separator ──
+
+export function renderTurnEnd(model: ModelAlias): string {
+  const label = colorize(model, "muted");
+  const line = colorize("───────", "muted");
+  return `\n${INDENT}${line} ${label}\n`;
+}
+
+// ── Stream writer for assistant text ──
+
+export class StreamWriter {
   private atLineStart = true;
 
-  constructor(
-    private readonly prefix: TranscriptPrefix,
-    private readonly display: DisplayFn
-  ) {}
+  constructor(private readonly display: DisplayFn) {}
 
   write(text: string): void {
     for (const char of text) {
       if (this.atLineStart) {
-        this.display(`${formatPrefix(this.prefix)} `);
+        if (char === "\n") {
+          this.display("\n");
+          continue;
+        }
+        this.display(INDENT);
         this.atLineStart = false;
       }
 

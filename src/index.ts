@@ -7,10 +7,13 @@ import {
 } from "./commands.js";
 import { startHeartbeat, stopHeartbeat, setBusy } from "./heartbeat.js";
 import {
-  PrefixedStreamWriter,
-  formatToolUse,
-  printTranscriptLine,
-  renderHeader,
+  StreamWriter,
+  Spinner,
+  printToolUse,
+  printNote,
+  printError,
+  renderWelcome,
+  renderTurnEnd,
   type UiState,
 } from "./ui.js";
 
@@ -22,7 +25,7 @@ async function main(): Promise<void> {
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: "❯ ",
+    prompt: "› ",
   });
 
   let sessionId: string | undefined;
@@ -30,19 +33,7 @@ async function main(): Promise<void> {
   let uiState: UiState = "idle";
   let shuttingDown = false;
 
-  const printHeader = () => {
-    display(`${renderHeader({ model: currentModel, sessionId, state: uiState })}\n`);
-  };
-
-  const setState = (next: UiState) => {
-    if (uiState === next) return;
-    uiState = next;
-    printHeader();
-  };
-
-  printTranscriptLine("note", "Type /model to view or switch model.", display);
-  printTranscriptLine("note", 'Type "exit" or "bye" to close.', display);
-  printHeader();
+  display(renderWelcome(currentModel));
 
   startHeartbeat();
   rl.prompt();
@@ -51,13 +42,12 @@ async function main(): Promise<void> {
     const input = line.trim();
 
     if (!input) {
-      printHeader();
       rl.prompt();
       return;
     }
 
     if (["exit", "bye", "quit", "q"].includes(input.toLowerCase())) {
-      printTranscriptLine("note", "See you!", display);
+      printNote("See you!", display);
       rl.close();
       return;
     }
@@ -65,48 +55,49 @@ async function main(): Promise<void> {
     const commandResult = handleSlashCommand(input, currentModel);
     if (commandResult.handled) {
       currentModel = commandResult.nextModel;
-      printTranscriptLine(
-        commandResult.isError ? "error" : "note",
-        commandResult.message,
-        display
-      );
-      printHeader();
+      if (commandResult.isError) {
+        printError(commandResult.message, display);
+      } else {
+        printNote(commandResult.message, display);
+      }
       rl.prompt();
       return;
     }
 
     display("\n");
-    printTranscriptLine("you", input, display);
-
     rl.pause();
     setBusy(true);
-    setState("thinking");
+
+    uiState = "thinking";
+    const spinner = new Spinner("thinking", display);
+    spinner.start();
 
     let hadError = false;
-    const assistantWriter = new PrefixedStreamWriter("jj", display);
+    const writer = new StreamWriter(display);
 
     try {
       const result = await chat(input, sessionId, modelIdForAlias(currentModel), {
         onText: (text) => {
-          if (uiState !== "thinking") {
-            setState("thinking");
-          }
-          assistantWriter.write(text);
+          if (spinner.isRunning()) spinner.stop();
+          uiState = "thinking";
+          writer.write(text);
         },
-        onToolUse: ({ name, input: toolInput }) => {
-          assistantWriter.flushLine();
-          setState("tool");
-          printTranscriptLine("tool", formatToolUse(name, toolInput), display);
+        onToolUse: ({ name }) => {
+          if (spinner.isRunning()) spinner.stop();
+          writer.flushLine();
+          uiState = "tool";
+          printToolUse(name, display);
         },
         onResultError: (subtype, errors) => {
+          if (spinner.isRunning()) spinner.stop();
           hadError = true;
-          assistantWriter.flushLine();
-          setState("error");
-          printTranscriptLine("error", `[${subtype}] ${errors.join("; ")}`, display);
+          writer.flushLine();
+          uiState = "error";
+          printError(`[${subtype}] ${errors.join("; ")}`, display);
         },
       });
 
-      assistantWriter.flushLine();
+      writer.flushLine();
       sessionId = result.sessionId;
 
       if (!hadError) {
@@ -114,14 +105,14 @@ async function main(): Promise<void> {
       }
     } catch (err) {
       hadError = true;
-      assistantWriter.flushLine();
+      writer.flushLine();
       uiState = "error";
       const msg = err instanceof Error ? err.message : String(err);
-      printTranscriptLine("error", msg, display);
+      printError(msg, display);
     } finally {
+      if (spinner.isRunning()) spinner.stop();
       setBusy(false);
-      display("\n");
-      printHeader();
+      display(renderTurnEnd(currentModel));
       rl.resume();
       rl.prompt();
     }
