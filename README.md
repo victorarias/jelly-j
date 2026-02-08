@@ -20,6 +20,8 @@ to suggest improvements (like a tidy roommate, not an annoying one).
 - **Rearrange** — move, resize, float, stack, fullscreen any pane
 - **Create** — new tabs and panes running any command
 - **Inspect** — dump the full layout, list tabs, show what's connected
+- **Configure** — find, read, and edit your active Zellij config/layout files
+- **Explain** — answer Zellij how/why questions from a bundled condensed docs reference
 - **Tidy up** — the heartbeat checks for unnamed tabs, overcrowded layouts, idle panes
 - **Escape hatch** — run any `zellij action` subcommand directly
 
@@ -130,7 +132,8 @@ end
 
 - **REPL**: readline prompt in a floating Zellij pane
 - **Agent**: Claude Opus 4.6 via the [Agent SDK](https://docs.anthropic.com/en/docs/claude-code/agent-sdk)
-- **Tools**: 20 MCP tools wrapping `zellij action` subcommands
+- **Tools**: Zellij MCP tools + Claude Code built-in agentic tools (Read/Edit/Write/Grep/Glob/Bash/Task)
+- **Permission policy**: Bash always prompts; writes outside detected Zellij config roots always prompt
 - **Heartbeat**: Haiku 4.5 checks workspace state every 5 minutes, shows popup suggestions
 
 ## Tools
@@ -174,6 +177,21 @@ end
 | Tool | What it does |
 |------|-------------|
 | `zellij_action` | Run any `zellij action` subcommand directly |
+
+### Config and docs
+
+| Tool | What it does |
+|------|-------------|
+| `get_zellij_config_info` | Detect active config/layout/cache/plugin paths (`zellij setup --check`) |
+| `list_zellij_config_files` | List files under active config roots |
+| `read_zellij_config_file` | Read config/layout/theme/plugin files |
+| `write_zellij_config_file` | Write full content to a config-related file |
+| `edit_zellij_config_file` | Deterministic string-replace patching for config files |
+| `get_zellij_knowledge` | Return bundled condensed Zellij reference |
+| `search_zellij_knowledge` | Search bundled reference sections by topic |
+
+The bundled reference source is tracked at `docs/zellij-knowledge-condensed.md`.
+`get_zellij_knowledge` also prepends your local detected Zellij version so answers can be interpreted against installed behavior.
 
 ## Heartbeat
 

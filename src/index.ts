@@ -95,6 +95,12 @@ async function main(): Promise<void> {
           uiState = "error";
           printError(`[${subtype}] ${errors.join("; ")}`, display);
         },
+        onPermissionRequest: (toolName, reason) => {
+          if (spinner.isRunning()) spinner.stop();
+          writer.flushLine();
+          uiState = "thinking";
+          printNote(`permission required: ${toolName} (${reason})`, display);
+        },
       });
 
       writer.flushLine();
