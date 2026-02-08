@@ -4,7 +4,6 @@ import {
   type SDKUserMessage,
   type SDKSystemMessage,
   type SDKAssistantMessage,
-  type SDKResultSuccess,
   type SDKResultError,
   type Options,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -43,10 +42,21 @@ For complex reorganizations (like "sort everything by project"), work
 step by step: understand the current state, make a plan, execute it,
 then confirm the result.`;
 
-export type DisplayFn = (text: string) => void;
+export type ChatModel = "claude-opus-4-6" | "claude-haiku-4-5-20251001";
+
+export type ToolUseEvent = {
+  name: string;
+  input: Record<string, unknown>;
+};
+
+export type ChatEvents = {
+  onText?: (text: string) => void;
+  onToolUse?: (event: ToolUseEvent) => void;
+  onResultError?: (subtype: string, errors: string[]) => void;
+};
 
 /**
- * Send a user message and stream assistant response via the display callback.
+ * Send a user message and stream assistant response via event callbacks.
  *
  * Each call spawns a new Claude Code subprocess. The SDK's v2 session API
  * (unstable_v2_createSession) would avoid per-turn subprocess overhead, but
@@ -59,7 +69,8 @@ export type DisplayFn = (text: string) => void;
 export async function chat(
   userMessage: string,
   sessionId: string | undefined,
-  display: DisplayFn
+  model: ChatModel,
+  events: ChatEvents = {}
 ): Promise<{ sessionId?: string }> {
   let newSessionId: string | undefined;
 
@@ -77,7 +88,7 @@ export async function chat(
 
   const options: Options = {
     systemPrompt: SYSTEM_PROMPT,
-    model: "claude-opus-4-6",
+    model,
     mcpServers: { zellij: zellijMcpServer },
     allowedTools: ["mcp__zellij__*"],
     maxTurns: 20,
@@ -93,24 +104,22 @@ export async function chat(
     prompt: generateMessages(),
     options,
   })) {
-    renderMessage(message, display);
+    renderMessage(message, events);
 
     if (message.type === "system" && "subtype" in message && message.subtype === "init") {
       newSessionId = (message as SDKSystemMessage).session_id;
     }
 
-    if (message.type === "result") {
-      if (message.subtype !== "success") {
-        const err = message as SDKResultError;
-        display(`\n  [${err.subtype}] ${err.errors.join("; ")}`);
-      }
+    if (message.type === "result" && message.subtype !== "success") {
+      const err = message as SDKResultError;
+      events.onResultError?.(err.subtype, err.errors);
     }
   }
 
   return { sessionId: newSessionId ?? sessionId };
 }
 
-function renderMessage(message: SDKMessage, display: DisplayFn): void {
+function renderMessage(message: SDKMessage, events: ChatEvents): void {
   if (message.type !== "assistant") return;
 
   const assistantMsg = message as SDKAssistantMessage;
@@ -119,13 +128,15 @@ function renderMessage(message: SDKMessage, display: DisplayFn): void {
 
   for (const block of content) {
     if (block.type === "text") {
-      display(block.text);
-    } else if (block.type === "tool_use") {
-      const input = block.input as Record<string, unknown>;
-      const inputStr = Object.entries(input)
-        .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-        .join(" ");
-      display(`\n  [zellij] ${block.name} ${inputStr}\n`);
+      events.onText?.(block.text);
+      continue;
+    }
+
+    if (block.type === "tool_use") {
+      events.onToolUse?.({
+        name: block.name,
+        input: block.input as Record<string, unknown>,
+      });
     }
   }
 }
@@ -165,7 +176,7 @@ If nothing worth suggesting, respond with exactly: NOTHING`;
 
   for await (const message of query({ prompt, options })) {
     if (message.type === "result" && message.subtype === "success") {
-      result = (message as SDKResultSuccess).result ?? "NOTHING";
+      result = message.result ?? "NOTHING";
     }
   }
 

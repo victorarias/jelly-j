@@ -31,7 +31,7 @@ Two components: a **Node.js REPL** (the assistant) and a **Rust WASM plugin** (t
 ## Mandatory Reference For Plugin Work
 
 Before changing any launcher/plugin/keybind behavior, read:
-- `docs/zellij-plugin-scripting-guide.md`
+- @docs/zellij-plugin-scripting-guide.md
 
 Maintenance rule:
 - If you find any statement in that guide is wrong, update it as part of your change.
