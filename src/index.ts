@@ -23,6 +23,8 @@ const GREETING = `
 const display = (text: string) => process.stdout.write(text);
 
 async function main(): Promise<void> {
+  // Set terminal title so the Zellij launcher plugin can find this pane
+  process.stdout.write("\x1b]0;Jelly J\x07");
   console.log(GREETING);
 
   startHeartbeat();

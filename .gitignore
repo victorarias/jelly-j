@@ -6,3 +6,5 @@ dist/
 !scripts/**/*.sh
 playwright-report/
 test-results/
+plugin/target/
+zellij-system-monitor
