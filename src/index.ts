@@ -1,42 +1,41 @@
 import { createInterface } from "node:readline";
 import { chat } from "./agent.js";
+import {
+  handleSlashCommand,
+  modelIdForAlias,
+  type ModelAlias,
+} from "./commands.js";
 import { startHeartbeat, stopHeartbeat, setBusy } from "./heartbeat.js";
-
-const GREETING = `
-       ___
-      (o o)
-     ( (_) )
-      /| |\\
-     / | | \\
-        ~ ~
-       __     ____             __
-      / /__  / / /_  __       / /
- __  / / _ \\/ / / / / /  __  / /
-/ /_/ /  __/ / / /_/ /  / /_/ /
-\\____/\\___/_/_/\\__, /   \\____/
-              /____/
-
-  What can I help you with?
-  (type "exit" or "bye" to close)
-`;
+import {
+  StreamWriter,
+  Spinner,
+  printToolUse,
+  printNote,
+  printError,
+  renderWelcome,
+  renderTurnEnd,
+  type UiState,
+} from "./ui.js";
 
 const display = (text: string) => process.stdout.write(text);
 
 async function main(): Promise<void> {
-  // Set terminal title so the Zellij launcher plugin can find this pane
   process.stdout.write("\x1b]0;Jelly J\x07");
-  console.log(GREETING);
-
-  startHeartbeat();
 
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: "❯ ",
+    prompt: "› ",
   });
 
   let sessionId: string | undefined;
+  let currentModel: ModelAlias = "opus";
+  let uiState: UiState = "idle";
+  let shuttingDown = false;
 
+  display(renderWelcome(currentModel));
+
+  startHeartbeat();
   rl.prompt();
 
   rl.on("line", async (line) => {
@@ -48,39 +47,83 @@ async function main(): Promise<void> {
     }
 
     if (["exit", "bye", "quit", "q"].includes(input.toLowerCase())) {
-      console.log("\n  See you!\n");
-      shutdown(rl);
+      printNote("See you!", display);
+      rl.close();
       return;
     }
 
-    // Pause readline to prevent concurrent queries from rapid input.
-    // Buffered input will be processed after resume.
+    const commandResult = handleSlashCommand(input, currentModel);
+    if (commandResult.handled) {
+      currentModel = commandResult.nextModel;
+      if (commandResult.isError) {
+        printError(commandResult.message, display);
+      } else {
+        printNote(commandResult.message, display);
+      }
+      rl.prompt();
+      return;
+    }
+
+    display("\n");
     rl.pause();
     setBusy(true);
 
+    uiState = "thinking";
+    const spinner = new Spinner("thinking", display);
+    spinner.start();
+
+    let hadError = false;
+    const writer = new StreamWriter(display);
+
     try {
-      const result = await chat(input, sessionId, display);
+      const result = await chat(input, sessionId, modelIdForAlias(currentModel), {
+        onText: (text) => {
+          if (spinner.isRunning()) spinner.stop();
+          uiState = "thinking";
+          writer.write(text);
+        },
+        onToolUse: ({ name }) => {
+          if (spinner.isRunning()) spinner.stop();
+          writer.flushLine();
+          uiState = "tool";
+          printToolUse(name, display);
+        },
+        onResultError: (subtype, errors) => {
+          if (spinner.isRunning()) spinner.stop();
+          hadError = true;
+          writer.flushLine();
+          uiState = "error";
+          printError(`[${subtype}] ${errors.join("; ")}`, display);
+        },
+      });
+
+      writer.flushLine();
       sessionId = result.sessionId;
-      display("\n\n");
+
+      if (!hadError) {
+        uiState = "idle";
+      }
     } catch (err) {
+      hadError = true;
+      writer.flushLine();
+      uiState = "error";
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`\n  [error] ${msg}\n`);
+      printError(msg, display);
     } finally {
+      if (spinner.isRunning()) spinner.stop();
       setBusy(false);
+      display(renderTurnEnd(currentModel));
       rl.resume();
       rl.prompt();
     }
   });
 
   rl.on("close", () => {
-    shutdown(rl);
+    if (shuttingDown) return;
+    shuttingDown = true;
+    stopHeartbeat();
+    process.exit(0);
   });
-}
-
-function shutdown(rl: ReturnType<typeof createInterface>): void {
-  stopHeartbeat();
-  rl.close();
-  process.exit(0);
 }
 
 main().catch((err) => {
