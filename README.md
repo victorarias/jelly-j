@@ -130,7 +130,7 @@ end
    └───────────┘
 ```
 
-- **REPL**: readline prompt in a floating Zellij pane
+- **UI**: differential-rendered terminal interface with a bottom-anchored prompt
 - **Agent**: Claude Opus 4.6 via the [Agent SDK](https://docs.anthropic.com/en/docs/claude-code/agent-sdk)
 - **Tools**: Zellij MCP tools + Claude Code built-in agentic tools (Read/Edit/Write/Grep/Glob/Bash/Task)
 - **Permission policy**: Bash always prompts; writes outside detected Zellij config roots always prompt

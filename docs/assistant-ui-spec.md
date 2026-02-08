@@ -1,7 +1,7 @@
 # Jelly J Assistant UI Spec (v1)
 
 Date: 2026-02-08
-Scope: terminal REPL UI only (`src/index.ts` path), one slash command (`/model`), one dark theme.
+Scope: differential-rendered terminal UI (`src/index.ts` path), two slash commands (`/model`, `/new`), one dark theme.
 
 ## 1) Goals
 
@@ -13,7 +13,7 @@ Scope: terminal REPL UI only (`src/index.ts` path), one slash command (`/model`)
 ## 2) Non-Goals
 
 1. No light mode or theme switching.
-2. No slash commands besides `/model`.
+2. No slash commands besides `/model` and `/new`.
 3. No mouse interaction.
 4. No markdown rendering engine.
 
@@ -60,7 +60,7 @@ Three persistent zones in the REPL:
 - Tool call lines
 - System notices (model changed, errors)
 
-3. Input line (readline prompt)
+3. Input line (custom raw-key input editor)
 - Prompt symbol: `❯`
 - Slash command entry and normal chat input
 
@@ -124,7 +124,7 @@ Formatting rules:
 
 ### 7.2 Slash Commands
 
-Only one command is supported:
+Supported slash commands:
 
 `/model`
 - `/model` -> shows current model and available aliases.
@@ -133,6 +133,9 @@ Only one command is supported:
   - `opus` -> `claude-opus-4-6` (default)
   - `haiku` -> `claude-haiku-4-5-20251001`
 - Invalid alias returns inline error with valid options.
+
+`/new`
+- `/new` -> clears transcript and starts a fresh assistant session (same selected model).
 
 Output examples:
 - `model current: opus (claude-opus-4-6)`
@@ -154,20 +157,24 @@ Fixed prefixes for scanability:
 
 1. `src/ui.ts`
 - ANSI helpers and semantic color functions
-- header renderer and state transitions
-- formatted line writer for transcript prefixes
+- differential line renderer (only changed rows are repainted)
+- bottom-anchored prompt box renderer and transcript layout
 
 2. `src/commands.ts`
 - parse slash commands
 - `/model` execution and validation
 
+3. `src/agent-session.ts`
+- queued, event-driven agent session orchestration
+- model/session state and streaming event fanout to UI
+
 ### 8.2 Changes to Existing Files
 
 1. `src/index.ts`
 - maintain `currentModel` in process state (default `opus`)
-- route `/model` input before `chat()`
-- render header initially and on state changes
-- emit prefixed user lines into transcript
+- route `/model` input before enqueueing prompts
+- handle raw keyboard input/history and keep prompt anchored at bottom
+- subscribe to agent-session events and update transcript
 
 2. `src/agent.ts`
 - accept model override in `chat(...)`
@@ -177,10 +184,11 @@ Fixed prefixes for scanability:
 
 1. Header always shows model + state before each prompt.
 2. `/model` works as query and setter, with validation.
-3. Assistant turns are visibly separated into `you/jj/tool/error` prefixed lines.
-4. Busy and tool states are visible during long responses.
-5. UI output remains plain terminal text and works inside Zellij floating pane.
-6. No regressions to exit commands (`exit`, `bye`, `quit`, `q`) or heartbeat behavior.
+3. `/new` clears session context and transcript and returns to idle state.
+4. Assistant turns are visibly separated into `you/jj/tool/error` prefixed lines.
+5. Busy and tool states are visible during long responses.
+6. UI output remains plain terminal text and works inside Zellij floating pane.
+7. No regressions to exit commands (`exit`, `bye`, `quit`, `q`) or heartbeat behavior.
 
 ## 10) Out of Scope Follow-up (v2+)
 

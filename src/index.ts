@@ -1,138 +1,385 @@
-import { createInterface } from "node:readline";
-import { chat } from "./agent.js";
+import { emitKeypressEvents } from "node:readline";
+import { AgentSession, type AgentSessionEvent } from "./agent-session.js";
 import {
   handleSlashCommand,
-  modelIdForAlias,
   type ModelAlias,
 } from "./commands.js";
-import { startHeartbeat, stopHeartbeat, setBusy } from "./heartbeat.js";
+import { startHeartbeat, stopHeartbeat } from "./heartbeat.js";
 import {
-  StreamWriter,
-  Spinner,
-  printToolUse,
-  printNote,
-  printError,
-  renderWelcome,
-  renderTurnEnd,
+  cleanToolName,
+  createWelcomeEntries,
+  DifferentialRenderer,
+  type TranscriptEntry,
   type UiState,
 } from "./ui.js";
 
-const display = (text: string) => process.stdout.write(text);
+type Keypress = {
+  name?: string;
+  sequence?: string;
+  ctrl?: boolean;
+  meta?: boolean;
+  shift?: boolean;
+};
 
-async function main(): Promise<void> {
-  process.stdout.write("\x1b]0;Jelly J\x07");
-
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: "› ",
-  });
-
-  let sessionId: string | undefined;
-  let currentModel: ModelAlias = "opus";
-  let uiState: UiState = "idle";
-  let shuttingDown = false;
-
-  display(renderWelcome(currentModel));
-
-  startHeartbeat();
-  rl.prompt();
-
-  rl.on("line", async (line) => {
-    const input = line.trim();
-
-    if (!input) {
-      rl.prompt();
-      return;
-    }
-
-    if (["exit", "bye", "quit", "q"].includes(input.toLowerCase())) {
-      printNote("See you!", display);
-      rl.close();
-      return;
-    }
-
-    const commandResult = handleSlashCommand(input, currentModel);
-    if (commandResult.handled) {
-      currentModel = commandResult.nextModel;
-      if (commandResult.isError) {
-        printError(commandResult.message, display);
-      } else {
-        printNote(commandResult.message, display);
-      }
-      rl.prompt();
-      return;
-    }
-
-    display("\n");
-    rl.pause();
-    setBusy(true);
-
-    uiState = "thinking";
-    const spinner = new Spinner("thinking", display);
-    spinner.start();
-
-    let hadError = false;
-    const writer = new StreamWriter(display);
-
-    try {
-      const result = await chat(input, sessionId, modelIdForAlias(currentModel), {
-        onText: (text) => {
-          if (spinner.isRunning()) spinner.stop();
-          uiState = "thinking";
-          writer.write(text);
-        },
-        onToolUse: ({ name }) => {
-          if (spinner.isRunning()) spinner.stop();
-          writer.flushLine();
-          uiState = "tool";
-          printToolUse(name, display);
-        },
-        onResultError: (subtype, errors) => {
-          if (spinner.isRunning()) spinner.stop();
-          hadError = true;
-          writer.flushLine();
-          uiState = "error";
-          printError(`[${subtype}] ${errors.join("; ")}`, display);
-        },
-        onPermissionRequest: (toolName, reason) => {
-          if (spinner.isRunning()) spinner.stop();
-          writer.flushLine();
-          uiState = "thinking";
-          printNote(`permission required: ${toolName} (${reason})`, display);
-        },
-      });
-
-      writer.flushLine();
-      sessionId = result.sessionId;
-
-      if (!hadError) {
-        uiState = "idle";
-      }
-    } catch (err) {
-      hadError = true;
-      writer.flushLine();
-      uiState = "error";
-      const msg = err instanceof Error ? err.message : String(err);
-      printError(msg, display);
-    } finally {
-      if (spinner.isRunning()) spinner.stop();
-      setBusy(false);
-      display(renderTurnEnd(currentModel));
-      rl.resume();
-      rl.prompt();
-    }
-  });
-
-  rl.on("close", () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    stopHeartbeat();
-    process.exit(0);
-  });
+function isExitCommand(input: string): boolean {
+  const value = input.toLowerCase();
+  return value === "exit" || value === "bye" || value === "quit" || value === "q";
 }
 
-main().catch((err) => {
-  console.error("Fatal:", err);
+async function main(): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error("Jelly J requires an interactive terminal (TTY).");
+    process.exit(1);
+  }
+
+  process.stdout.write("\x1b]0;Jelly J\x07");
+
+  const renderer = new DifferentialRenderer();
+  let model: ModelAlias = "opus";
+  let state: UiState = "idle";
+  let busy = false;
+  let queueLength = 0;
+  let sessionId: string | undefined;
+  const entries: TranscriptEntry[] = createWelcomeEntries(model);
+  let transcriptScroll = 0;
+
+  let input = "";
+  let cursor = 0;
+  let activeAssistantIndex: number | undefined;
+
+  const inputHistory: string[] = [];
+  let historyIndex = -1;
+  let historyDraft = "";
+
+  let shuttingDown = false;
+  let session: AgentSession | undefined;
+  let unsubscribe = (): void => {};
+
+  const render = (): void => {
+    renderer.render({
+      model,
+      sessionId,
+      state,
+      queueLength,
+      entries,
+      transcriptScroll,
+      input,
+      cursor,
+    });
+  };
+  const animationInterval = setInterval(() => {
+    if (state === "thinking" || state === "tool") {
+      render();
+    }
+  }, 80);
+
+  const onSessionEvent = (event: AgentSessionEvent): void => {
+    switch (event.type) {
+      case "state":
+        model = event.model;
+        sessionId = event.sessionId;
+        state = event.uiState;
+        busy = event.busy;
+        queueLength = event.queueLength;
+        break;
+      case "queued":
+        if (busy) {
+          entries.push({
+            kind: "note",
+            text: `queued message (${event.queueLength})`,
+          });
+        }
+        break;
+      case "turn_start":
+        activeAssistantIndex = undefined;
+        entries.push({ kind: "you", text: event.input });
+        break;
+      case "text":
+        if (
+          activeAssistantIndex === undefined ||
+          activeAssistantIndex < 0 ||
+          activeAssistantIndex >= entries.length ||
+          entries[activeAssistantIndex]?.kind !== "jj"
+        ) {
+          entries.push({ kind: "jj", text: "" });
+          activeAssistantIndex = entries.length - 1;
+        }
+        entries[activeAssistantIndex].text += event.text;
+        break;
+      case "tool_use":
+        activeAssistantIndex = undefined;
+        entries.push({
+          kind: "tool",
+          text: cleanToolName(event.event.name),
+        });
+        break;
+      case "turn_error":
+        activeAssistantIndex = undefined;
+        entries.push({ kind: "error", text: event.message });
+        break;
+      case "turn_end":
+        activeAssistantIndex = undefined;
+        sessionId = event.sessionId ?? sessionId;
+        break;
+    }
+    render();
+  };
+
+  const startFreshSession = (note?: string): void => {
+    session?.stop();
+    unsubscribe();
+
+    sessionId = undefined;
+    state = "idle";
+    busy = false;
+    queueLength = 0;
+    activeAssistantIndex = undefined;
+    transcriptScroll = 0;
+
+    entries.splice(0, entries.length, ...createWelcomeEntries(model));
+    if (note) {
+      entries.push({ kind: "note", text: note });
+    }
+
+    session = new AgentSession(model);
+    unsubscribe = session.subscribe(onSessionEvent);
+    render();
+  };
+
+  startFreshSession();
+
+  const shutdown = (message?: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    session?.stop();
+    unsubscribe();
+    stopHeartbeat();
+    clearInterval(animationInterval);
+
+    process.stdout.off("resize", render);
+    process.stdin.off("keypress", onKeypress);
+    process.stdin.setRawMode(false);
+    process.stdin.pause();
+
+    renderer.stop();
+
+    if (message) {
+      process.stdout.write(`${message}\n`);
+    }
+
+    process.exit(0);
+  };
+
+  const submitInput = (): void => {
+    const rawInput = input;
+    const message = rawInput.trim();
+
+    input = "";
+    cursor = 0;
+    transcriptScroll = 0;
+    historyIndex = -1;
+    historyDraft = "";
+
+    render();
+
+    if (!message.length) return;
+
+    if (isExitCommand(message)) {
+      entries.push({
+        kind: "note",
+        text: "Exit is disabled in persistent mode. Agent stays running.",
+      });
+      render();
+      return;
+    }
+
+    if (inputHistory[inputHistory.length - 1] !== message) {
+      inputHistory.push(message);
+    }
+
+    const commandResult = handleSlashCommand(message, model);
+    if (commandResult.handled) {
+      model = commandResult.nextModel;
+      if (commandResult.action === "new_session" && !commandResult.isError) {
+        startFreshSession(commandResult.message);
+      } else {
+        session?.setModel(model);
+        entries.push({
+          kind: commandResult.isError ? "error" : "note",
+          text: commandResult.message,
+        });
+        render();
+      }
+      return;
+    }
+
+    session?.enqueue(message);
+  };
+
+  const insertText = (text: string): void => {
+    const safe = text.replace(/[\r\n]+/g, " ");
+    if (!safe.length) return;
+    input = `${input.slice(0, cursor)}${safe}${input.slice(cursor)}`;
+    cursor += safe.length;
+  };
+
+  const scrollTranscript = (direction: "up" | "down"): void => {
+    const viewportLines = Math.max(1, (process.stdout.rows || 24) - 5);
+    const step = Math.max(1, Math.floor(viewportLines * 0.8));
+    if (direction === "up") {
+      transcriptScroll += step;
+    } else {
+      transcriptScroll = Math.max(0, transcriptScroll - step);
+    }
+  };
+
+  const selectHistory = (delta: -1 | 1): void => {
+    if (!inputHistory.length) return;
+
+    if (historyIndex === -1) {
+      historyDraft = input;
+      historyIndex = inputHistory.length;
+    }
+
+    historyIndex = Math.max(0, Math.min(inputHistory.length, historyIndex + delta));
+
+    if (historyIndex === inputHistory.length) {
+      input = historyDraft;
+    } else {
+      input = inputHistory[historyIndex] ?? "";
+    }
+    cursor = input.length;
+  };
+
+  const onKeypress = (str: string, key: Keypress): void => {
+    if (key.ctrl && key.name === "c") {
+      entries.push({
+        kind: "note",
+        text: "Ctrl+C captured. Agent stays running.",
+      });
+      render();
+      return;
+    }
+
+    if (key.ctrl && key.name === "d" && input.length === 0) {
+      entries.push({
+        kind: "note",
+        text: "Ctrl+D captured. Agent stays running.",
+      });
+      render();
+      return;
+    }
+
+    if (key.name === "return" || key.name === "enter") {
+      submitInput();
+      return;
+    }
+
+    if (key.name === "pageup") {
+      scrollTranscript("up");
+      render();
+      return;
+    }
+
+    if (key.name === "pagedown") {
+      scrollTranscript("down");
+      render();
+      return;
+    }
+
+    if (key.name === "backspace") {
+      if (cursor > 0) {
+        input = `${input.slice(0, cursor - 1)}${input.slice(cursor)}`;
+        cursor -= 1;
+      }
+      render();
+      return;
+    }
+
+    if (key.name === "delete") {
+      if (cursor < input.length) {
+        input = `${input.slice(0, cursor)}${input.slice(cursor + 1)}`;
+      }
+      render();
+      return;
+    }
+
+    if (key.name === "left") {
+      cursor = Math.max(0, cursor - 1);
+      render();
+      return;
+    }
+
+    if (key.name === "right") {
+      cursor = Math.min(input.length, cursor + 1);
+      render();
+      return;
+    }
+
+    if (key.name === "home") {
+      cursor = 0;
+      render();
+      return;
+    }
+
+    if (key.name === "end") {
+      cursor = input.length;
+      render();
+      return;
+    }
+
+    if (key.name === "up") {
+      selectHistory(-1);
+      render();
+      return;
+    }
+
+    if (key.name === "down") {
+      selectHistory(1);
+      render();
+      return;
+    }
+
+    if (key.name === "escape") {
+      input = "";
+      cursor = 0;
+      historyIndex = -1;
+      historyDraft = "";
+      render();
+      return;
+    }
+
+    if (!key.ctrl && !key.meta && str && !/[\x00-\x1f\x7f]/.test(str)) {
+      insertText(str);
+      render();
+    }
+  };
+
+  renderer.start();
+
+  emitKeypressEvents(process.stdin);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.on("keypress", onKeypress);
+
+  process.stdout.on("resize", render);
+
+  process.on("SIGINT", () => {
+    entries.push({
+      kind: "note",
+      text: "SIGINT captured. Agent stays running.",
+    });
+    render();
+  });
+  process.on("SIGTERM", () => shutdown());
+
+  startHeartbeat();
+  render();
+}
+
+main().catch((error) => {
+  const message = error instanceof Error ? error.stack ?? error.message : String(error);
+  process.stderr.write(`${message}\n`);
   process.exit(1);
 });
