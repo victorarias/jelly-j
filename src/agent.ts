@@ -7,7 +7,6 @@ import {
   type SDKResultError,
   type Options,
 } from "@anthropic-ai/claude-agent-sdk";
-import { createInterface } from "node:readline/promises";
 import os from "node:os";
 import path from "node:path";
 import { stdin as processStdin, stdout as processStdout } from "node:process";
@@ -127,27 +126,29 @@ async function askPermissionPrompt(
     return "no";
   }
 
-  const rl = createInterface({
-    input: processStdin,
-    output: processStdout,
-  });
+  const readLine = async (): Promise<string> => {
+    processStdin.resume();
+    return await new Promise<string>((resolve) => {
+      const onData = (chunk: string | Buffer): void => {
+        processStdin.off("data", onData);
+        resolve(String(chunk));
+      };
+      processStdin.on("data", onData);
+    });
+  };
 
-  try {
-    while (true) {
-      const answer = (
-        await rl.question(
-          `${message}${os.EOL}Allow? [y]es / [n]o / [a]ll (${allowAllLabel}): `
-        )
-      )
-        .trim()
-        .toLowerCase();
-      if (answer === "y" || answer === "yes") return "yes";
-      if (answer === "n" || answer === "no" || answer === "") return "no";
-      if (answer === "a" || answer === "all") return "all";
-      processStdout.write("Please answer y, n, or a." + os.EOL);
-    }
-  } finally {
-    rl.close();
+  while (true) {
+    processStdout.write(
+      `${message}${os.EOL}Allow? [y]es / [n]o / [a]ll (${allowAllLabel}): `
+    );
+    const line = (await readLine()).trim().toLowerCase();
+
+    // Accept common accidental repeats (eg. "yy") by keying on first char.
+    const first = line.charAt(0);
+    if (first === "y") return "yes";
+    if (first === "n" || line === "") return "no";
+    if (first === "a") return "all";
+    processStdout.write("Please answer y, n, or a." + os.EOL);
   }
 }
 
