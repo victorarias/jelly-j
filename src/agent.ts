@@ -6,7 +6,6 @@ import {
   type SDKAssistantMessage,
   type SDKResultError,
   type Options,
-  type PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
 import { createInterface } from "node:readline/promises";
 import os from "node:os";
@@ -114,6 +113,12 @@ function isWriteTool(toolName: string): boolean {
   return WRITE_TOOL_NAMES.has(toolName) || WRITE_TOOL_NAME_PATTERN.test(toolName);
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 async function askPermissionPrompt(
   message: string,
   allowAllLabel: string
@@ -146,100 +151,160 @@ async function askPermissionPrompt(
   }
 }
 
-function buildPermissionPolicy(
+function buildPermissionHooks(
   configInfo: ZellijConfigInfo,
   events: ChatEvents
-): NonNullable<Options["canUseTool"]> {
+): NonNullable<Options["hooks"]> {
   const configRoots = getZellijConfigRoots(configInfo).map((root) => path.resolve(root));
   let allowAllBash = false;
   let allowAllOutsideConfigWrites = false;
   const approvedOutsideConfigWritePaths = new Set<string>();
 
-  return async (toolName, input, callbackOptions): Promise<PermissionResult> => {
-    const toolInput =
-      typeof input === "object" && input !== null
-        ? (input as Record<string, unknown>)
-        : {};
+  return {
+    PreToolUse: [
+      {
+        matcher: "*",
+        hooks: [
+          async (input) => {
+            const toolName =
+              typeof (input as { tool_name?: unknown }).tool_name === "string"
+                ? (input as { tool_name: string }).tool_name
+                : "unknown";
+            const toolInput = asRecord((input as { tool_input?: unknown }).tool_input);
 
-    if (BASH_TOOL_NAMES.has(toolName)) {
-      if (allowAllBash) return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
+            if (BASH_TOOL_NAMES.has(toolName)) {
+              if (allowAllBash) {
+                return {
+                  continue: true,
+                  hookSpecificOutput: {
+                    hookEventName: "PreToolUse",
+                    permissionDecision: "allow",
+                  },
+                };
+              }
 
-      const command =
-        typeof toolInput.command === "string" ? toolInput.command : "(unknown)";
-      events.onPermissionRequest?.(toolName, "bash command");
-      const decision = await askPermissionPrompt(
-        [
-          "",
-          "Jelly J requests Bash execution.",
-          `Tool: ${toolName}`,
-          `Command: ${command}`,
-        ].join(os.EOL),
-        "all bash this run"
-      );
+              const command =
+                typeof toolInput.command === "string" ? toolInput.command : "(unknown)";
+              events.onPermissionRequest?.(toolName, "bash command");
+              const decision = await askPermissionPrompt(
+                [
+                  "",
+                  "Jelly J requests Bash execution.",
+                  `Tool: ${toolName}`,
+                  `Command: ${command}`,
+                ].join(os.EOL),
+                "all bash this run"
+              );
 
-      if (decision === "all") {
-        allowAllBash = true;
-        return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
-      }
-      if (decision === "yes") {
-        return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
-      }
-      return {
-        behavior: "deny",
-        message:
-          "Bash execution denied by user. Ask the user for approval before retrying.",
-        toolUseID: callbackOptions.toolUseID,
-      };
-    }
+              if (decision === "all") {
+                allowAllBash = true;
+                return {
+                  continue: true,
+                  hookSpecificOutput: {
+                    hookEventName: "PreToolUse",
+                    permissionDecision: "allow",
+                  },
+                };
+              }
+              if (decision === "yes") {
+                return {
+                  continue: true,
+                  hookSpecificOutput: {
+                    hookEventName: "PreToolUse",
+                    permissionDecision: "allow",
+                  },
+                };
+              }
 
-    if (!isWriteTool(toolName)) {
-      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
-    }
+              return {
+                continue: true,
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse",
+                  permissionDecision: "deny",
+                  permissionDecisionReason:
+                    "Bash execution denied by user. Ask for approval before retrying.",
+                },
+              };
+            }
 
-    const maybePath = inputPathForTool(toolName, toolInput);
-    if (!maybePath) {
-      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
-    }
+            if (!isWriteTool(toolName)) {
+              return { continue: true };
+            }
 
-    const resolvedPath = path.resolve(maybePath);
-    const insideConfigRoots = configRoots.some((root) => isInsidePath(resolvedPath, root));
+            const maybePath = inputPathForTool(toolName, toolInput);
+            if (!maybePath) {
+              return { continue: true };
+            }
 
-    if (insideConfigRoots) {
-      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
-    }
+            const resolvedPath = path.resolve(maybePath);
+            const insideConfigRoots = configRoots.some((root) =>
+              isInsidePath(resolvedPath, root)
+            );
 
-    if (allowAllOutsideConfigWrites || approvedOutsideConfigWritePaths.has(resolvedPath)) {
-      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
-    }
+            if (insideConfigRoots) {
+              return { continue: true };
+            }
 
-    events.onPermissionRequest?.(toolName, "write outside zellij config roots");
-    const decision = await askPermissionPrompt(
-      [
-        "",
-        "Jelly J requests file modification outside Zellij config roots.",
-        `Tool: ${toolName}`,
-        `Path: ${resolvedPath}`,
-        `Allowed roots: ${configRoots.join(", ")}`,
-      ].join(os.EOL),
-      "all outside-config writes this run"
-    );
+            if (
+              allowAllOutsideConfigWrites ||
+              approvedOutsideConfigWritePaths.has(resolvedPath)
+            ) {
+              return {
+                continue: true,
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse",
+                  permissionDecision: "allow",
+                },
+              };
+            }
 
-    if (decision === "all") {
-      allowAllOutsideConfigWrites = true;
-      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
-    }
+            events.onPermissionRequest?.(toolName, "write outside zellij config roots");
+            const decision = await askPermissionPrompt(
+              [
+                "",
+                "Jelly J requests file modification outside Zellij config roots.",
+                `Tool: ${toolName}`,
+                `Path: ${resolvedPath}`,
+                `Allowed roots: ${configRoots.join(", ")}`,
+              ].join(os.EOL),
+              "all outside-config writes this run"
+            );
 
-    if (decision === "yes") {
-      approvedOutsideConfigWritePaths.add(resolvedPath);
-      return { behavior: "allow", toolUseID: callbackOptions.toolUseID };
-    }
+            if (decision === "all") {
+              allowAllOutsideConfigWrites = true;
+              return {
+                continue: true,
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse",
+                  permissionDecision: "allow",
+                },
+              };
+            }
 
-    return {
-      behavior: "deny",
-      message:
-        "File modification outside zellij config roots denied by user. Ask for approval before retrying.",
-      toolUseID: callbackOptions.toolUseID,
-    };
+            if (decision === "yes") {
+              approvedOutsideConfigWritePaths.add(resolvedPath);
+              return {
+                continue: true,
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse",
+                  permissionDecision: "allow",
+                },
+              };
+            }
+
+            return {
+              continue: true,
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                permissionDecision: "deny",
+                permissionDecisionReason:
+                  "File modification outside zellij config roots denied by user. Ask for approval before retrying.",
+              },
+            };
+          },
+        ],
+      },
+    ],
   };
 }
 
@@ -286,7 +351,7 @@ export async function chat(
     maxTurns: 20,
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
-    canUseTool: buildPermissionPolicy(zellijConfigInfo, events),
+    hooks: buildPermissionHooks(zellijConfigInfo, events),
   };
 
   if (additionalDirectories.length > 0) {
