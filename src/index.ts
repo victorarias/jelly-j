@@ -6,6 +6,7 @@ import {
   type ModelAlias,
 } from "./commands.js";
 import { startHeartbeat, stopHeartbeat, setBusy } from "./heartbeat.js";
+import { logTranscriptTurn } from "./logging.js";
 import {
   StreamWriter,
   Spinner,
@@ -73,6 +74,9 @@ async function main(): Promise<void> {
     spinner.start();
 
     let hadError = false;
+    let assistantText = "";
+    const resultErrors: string[] = [];
+    let caughtErrorMessage: string | undefined;
     const writer = new StreamWriter(display);
 
     try {
@@ -80,6 +84,7 @@ async function main(): Promise<void> {
         onText: (text) => {
           if (spinner.isRunning()) spinner.stop();
           uiState = "thinking";
+          assistantText += text;
           writer.write(text);
         },
         onToolUse: ({ name }) => {
@@ -91,9 +96,11 @@ async function main(): Promise<void> {
         onResultError: (subtype, errors) => {
           if (spinner.isRunning()) spinner.stop();
           hadError = true;
+          const formatted = `[${subtype}] ${errors.join("; ")}`;
+          resultErrors.push(formatted);
           writer.flushLine();
           uiState = "error";
-          printError(`[${subtype}] ${errors.join("; ")}`, display);
+          printError(formatted, display);
         },
         onPermissionRequest: (toolName, reason) => {
           if (spinner.isRunning()) spinner.stop();
@@ -114,9 +121,18 @@ async function main(): Promise<void> {
       writer.flushLine();
       uiState = "error";
       const msg = err instanceof Error ? err.message : String(err);
+      caughtErrorMessage = msg;
       printError(msg, display);
     } finally {
       if (spinner.isRunning()) spinner.stop();
+      const error =
+        resultErrors.length > 0 ? resultErrors.join("\n") : caughtErrorMessage;
+      logTranscriptTurn({
+        model: currentModel,
+        user: input,
+        assistant: assistantText,
+        error,
+      });
       setBusy(false);
       display(renderTurnEnd(currentModel));
       rl.resume();
