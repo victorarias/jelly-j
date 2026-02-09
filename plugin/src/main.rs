@@ -221,7 +221,7 @@ impl State {
         let pane_ref = PaneId::Terminal(pane_id);
         if self.relocating_waiting_for_suppressed {
             if pane.is_suppressed {
-                show_pane_with_id(pane_ref, true);
+                show_pane_with_id(pane_ref, true, true);
                 self.finish();
             } else {
                 self.relocating_updates = self.relocating_updates.saturating_add(1);
@@ -236,10 +236,10 @@ impl State {
         }
 
         if pane.is_suppressed {
-            show_pane_with_id(pane_ref, true);
+            show_pane_with_id(pane_ref, true, true);
             self.finish();
         } else if pane.is_floating {
-            show_pane_with_id(pane_ref, true);
+            show_pane_with_id(pane_ref, true, true);
             self.finish();
         } else {
             // Pane arrived tiled. Suppress first, then restore as floating.
@@ -277,7 +277,7 @@ impl State {
                 if !pane.is_suppressed {
                     hide_pane_with_id(pane_id);
                 } else {
-                    show_pane_with_id(pane_id, true);
+                    show_pane_with_id(pane_id, true, true);
                 }
             } else {
                 // Host the assistant in the currently focused tab so it's always one keypress away.
@@ -352,7 +352,7 @@ impl State {
                 PaneId::Terminal(id),
             );
             rename_terminal_pane(id, PANE_NAME);
-            show_pane_with_id(PaneId::Terminal(id), true);
+            show_pane_with_id(PaneId::Terminal(id), true, true);
             self.finish();
         } else {
             // Recover if no matching pane arrives after enough manifest updates.

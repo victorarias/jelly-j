@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-zellij-tile = "0.43.1"
+zellij-tile = { path = "../../../zellij/zellij-tile" }
 
 [profile.release]
 opt-level = "z"

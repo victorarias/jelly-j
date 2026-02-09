@@ -12,9 +12,10 @@ Scope:
 - Test strategy for multi-tab toggle regressions
 
 Version notes:
-- Jelly J currently targets `zellij-tile = 0.43.1`.
-- In `0.43.1`, `show_pane_with_id` takes 2 args (`pane_id`, `should_float_if_hidden`).
-- On Zellij `main` (post-0.43.1), `show_pane_with_id` includes an extra `should_focus_pane` arg.
+- Jelly J launcher currently targets a local Zellij `main` checkout via `zellij-tile = { path = "../../../zellij/zellij-tile" }`.
+- Verified upstream reference: `zellij-org/zellij` commit `97744ad0` (2026-02-08).
+- On `main`, `show_pane_with_id` takes 3 args: (`pane_id`, `should_float_if_hidden`, `should_focus_pane`).
+- On `v0.43.1`, `show_pane_with_id` takes 2 args.
 
 ## 1) Lifecycle Rules You Must Assume
 
@@ -62,10 +63,10 @@ Commands and implications:
 - `hide_self`: suppresses plugin pane from UI.
 - `close_self`: closes plugin pane instance; if it is the only selectable pane, session can exit.
 - `hide_pane_with_id`: suppresses target pane.
-- `show_pane_with_id(pane_id, should_float_if_hidden)`: unsuppresses, focuses, and can re-float when hidden.
+- `show_pane_with_id(pane_id, should_float_if_hidden, should_focus_pane)`: unsuppresses, can focus, and can re-float when hidden.
 - `break_panes_to_tab_with_index`: moves pane(s) to tab index.
 
-Observed Jelly J invariant (source-backed, Zellij `v0.43.1`):
+Observed Jelly J invariant (source-backed, Zellij `main` @ `97744ad0`):
 - `break_panes_to_tab_with_index` preserves floating only when `pane_id_is_floating(...)` is true in the source tab.
 - `pane_id_is_floating` only checks the floating pane collection (suppressed panes are not considered floating).
 - If you suppress before break, the moved pane can be re-added as tiled (docked split) in the target tab.
@@ -73,7 +74,7 @@ Observed Jelly J invariant (source-backed, Zellij `v0.43.1`):
 Safer relocation sequence for "always floating":
 1. `break_panes_to_tab_with_index`
 2. `hide_pane_with_id`
-3. `show_pane_with_id(..., true)`
+3. `show_pane_with_id(..., true, true)`
 
 This sequence forces restored floating state in the destination tab, even after prior suppress/hide cycles.
 
@@ -108,7 +109,7 @@ Why:
 If Jelly reappears docked:
 1. Confirm keybind uses `LaunchOrFocusPlugin`, not `MessagePlugin`.
 2. Confirm relocation path does **not** suppress before `break_panes_to_tab_with_index`.
-3. Confirm re-show uses `show_pane_with_id(..., true)`.
+3. Confirm re-show uses `show_pane_with_id(..., true, true)`.
 4. Confirm plugin cycle ends with `close_self()`.
 5. Re-run multi-tab stress test.
 
@@ -135,9 +136,9 @@ Primary references used:
 - `show_pane_with_id` (command description): https://zellij.dev/documentation/plugin-api-commands
 - `write_chars_to_pane_id`: https://docs.rs/zellij-tile/latest/zellij_tile/shim/fn.write_chars_to_pane_id.html
 - Event enum including `PermissionRequestResult`: https://docs.rs/zellij-tile/latest/zellij_tile/prelude/enum.Event.html
-- Zellij source inspected locally: `/tmp/zellij` (commit `97744ad`, tag `v0.43.1` compared with `main`)
+- Zellij source inspected locally: `/tmp/zellij` (commit `97744ad0`, branch `main`)
 
-## 10) Source-Backed Invariants (v0.43.1)
+## 10) Source-Backed Invariants (main @ 97744ad0)
 
 These are the implementation facts this project should treat as ground truth until re-verified on a newer tag:
 
@@ -160,10 +161,10 @@ These are the implementation facts this project should treat as ground truth unt
 - `suppress_pane` calls `extract_pane(..., true)` and stores pane in `suppressed_panes`.
 - Relevant code: `zellij-server/src/tab/mod.rs` (`suppress_pane`, `extract_pane`).
 
-5. API drift on `main`:
+5. Version drift to older stable tags:
 - On `main`, `show_pane_with_id` in `zellij-tile` includes `should_focus_pane`.
 - On `v0.43.1`, it only takes `should_float_if_hidden`.
-- This repo compiles against `0.43.1`, so examples must use the 2-arg form.
+- This repo currently compiles against local `main`, so examples must use the 3-arg form.
 
 ## 11) Debug Playbook for Alt+j Drift
 
@@ -182,8 +183,8 @@ If users report intermittent “opens as vertical split”:
 ## 12) Maintenance Workflow
 
 Before changing launcher logic:
-1. Re-verify invariants against current target tag (`v0.43.1` unless dependency is upgraded).
-2. If reading `main`, explicitly mark which behaviors are not yet in our target tag.
+1. Re-verify invariants against the current target (`main` commit in use for local dependency).
+2. If reading older tags (eg. `v0.43.1`), explicitly mark which behaviors differ from `main`.
 3. Update this guide in the same PR/commit whenever a claim changes.
 4. Keep at least one e2e regression that simulates:
 - hide in one tab
