@@ -210,11 +210,16 @@ async function main(): Promise<void> {
     void shutdown(0);
   });
 
-  process.on("SIGINT", () => {
+  const handleSigint = () => {
     display("\n");
     printNote('Ctrl-C does not exit Jelly J. Type "exit" to close it.', display);
     rl.prompt();
-  });
+  };
+
+  // Bun/Node can surface Ctrl-C via readline or process signal paths.
+  // Trap both so Ctrl-C is consistently non-fatal for the singleton agent.
+  rl.on("SIGINT", handleSigint);
+  process.on("SIGINT", handleSigint);
 
   process.on("SIGTERM", () => {
     rl.close();
