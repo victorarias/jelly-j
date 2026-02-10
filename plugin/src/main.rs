@@ -174,7 +174,9 @@ impl ZellijPlugin for State {
             }
             _ => {}
         }
-        true
+        // We don't render UI; rendering only calls hide_self(). Returning true on every
+        // state event creates a feedback loop of render/hide/update cycles.
+        false
     }
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {

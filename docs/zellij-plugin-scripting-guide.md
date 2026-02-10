@@ -27,6 +27,7 @@ Operational assumptions:
 - `PermissionRequestResult` may arrive after `PaneUpdate`/`TabUpdate`.
 - Pipe requests can arrive before caches are populated.
 - On `main`, some headless/background harness runs emit `PaneUpdate` without `TabUpdate`.
+- For hidden-control plugins, `update() -> true` can trigger frequent `render()` calls even when no UI needs repaint.
 
 Practical rule for Jelly J:
 - Gate stateful actions behind permission readiness and pane-cache readiness.
@@ -92,6 +93,9 @@ High-level flow:
 The plugin is persistent:
 - Keep `hide_self()` in `render()`.
 - Do not call `close_self()` after each toggle.
+- Keep `update()` returning `false` unless a visible UI repaint is actually required.
+  If `render()` only hides the plugin pane, returning `true` on every state event can create
+  render/hide/update feedback loops and steadily increasing toggle latency.
 
 ## 6) Focus and Tab Resolution
 

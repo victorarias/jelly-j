@@ -148,6 +148,11 @@ These are implementation constraints agents should treat as hard-won invariants 
    - Keep a short dedup window in the plugin toggle handler to avoid hide-then-show on a single Alt+j press.
    - Do not rely only on CLI pipe-id dedup; keybind sources have no pipe id.
 
+12. Do not render on every plugin state event for hidden-control plugins.
+   - For Jelly J, `render()` only calls `hide_self()`. If `update()` returns `true` on every `PaneUpdate`/`TabUpdate`, Zellij can enter a render/hide/update feedback loop.
+   - Keep `update()` returning `false` unless a real UI repaint is required.
+   - Symptom of violation: toggle latency grows with each press (eg. 50ms → seconds) while client/plugin counts stay flat.
+
 ## npm Distribution
 
 Published as `jelly-j` on npm. Build output is ESM with `#!/usr/bin/env bun` shebang and `dist/` is the published payload.
