@@ -142,6 +142,11 @@ These are implementation constraints agents should treat as hard-won invariants 
    - Shutdown/fatal paths must release lock best-effort.
    - `Ctrl-C` should not terminate Jelly J by default; explicit `exit`/`quit` controls termination.
 
+11. Never use raw `zellij pipe` for ops/restart flows without a timeout.
+   - `zellij pipe` can block if a plugin-side CLI pipe is never unblocked.
+   - For operational restart, use `npm run ops:restart` (timeout-bounded, lock-aware, no unbounded pipe wait).
+   - In code, map pipe timeouts to explicit `ZellijPipeError` with `code="timeout"` and surface actionable errors.
+
 ## npm Distribution
 
 Published as `jelly-j` on npm. Build output is ESM with `#!/usr/bin/env bun` shebang and `dist/` is the published payload.

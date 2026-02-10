@@ -4,7 +4,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 8_000;
+const TOGGLE_TIMEOUT_MS = 3_000;
 
 const DEFAULT_PLUGIN_URL = `file:${path.join(
   os.homedir(),
@@ -33,6 +34,24 @@ export class ZellijPipeError extends Error {
     super(message);
     this.name = "ZellijPipeError";
   }
+}
+
+function pipeExecError(error: unknown, timeoutMs: number): ZellijPipeError {
+  if (error instanceof Error) {
+    const maybeErr = error as NodeJS.ErrnoException & {
+      killed?: boolean;
+      signal?: string;
+      timedOut?: boolean;
+    };
+    if (maybeErr.code === "ETIMEDOUT" || maybeErr.signal === "SIGTERM" || maybeErr.timedOut) {
+      return new ZellijPipeError(
+        `Butler pipe timed out after ${timeoutMs}ms`,
+        "timeout"
+      );
+    }
+    return new ZellijPipeError(maybeErr.message, maybeErr.code);
+  }
+  return new ZellijPipeError(String(error));
 }
 
 export interface ButlerTab {
@@ -80,19 +99,24 @@ function pluginUrl(): string {
 }
 
 async function pipeRequest<T>(payload: ButlerRequest): Promise<T> {
-  const { stdout } = await execFileAsync(
-    "zellij",
-    [
-      "pipe",
-      "--plugin",
-      pluginUrl(),
-      "--name",
-      "request",
-      "--",
-      JSON.stringify(payload),
-    ],
-    { timeout: TIMEOUT_MS }
-  );
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(
+      "zellij",
+      [
+        "pipe",
+        "--plugin",
+        pluginUrl(),
+        "--name",
+        "request",
+        "--",
+        JSON.stringify(payload),
+      ],
+      { timeout: REQUEST_TIMEOUT_MS }
+    ));
+  } catch (error) {
+    throw pipeExecError(error, REQUEST_TIMEOUT_MS);
+  }
 
   const raw = stdout.trim();
   if (!raw) {
@@ -162,9 +186,13 @@ export async function showPaneById(
 }
 
 export async function toggleButler(): Promise<void> {
-  await execFileAsync(
-    "zellij",
-    ["pipe", "--plugin", pluginUrl(), "--name", "toggle", "--", "toggle"],
-    { timeout: TIMEOUT_MS }
-  );
+  try {
+    await execFileAsync(
+      "zellij",
+      ["pipe", "--plugin", pluginUrl(), "--name", "toggle", "--", "toggle"],
+      { timeout: TOGGLE_TIMEOUT_MS }
+    );
+  } catch (error) {
+    throw pipeExecError(error, TOGGLE_TIMEOUT_MS);
+  }
 }
