@@ -8,6 +8,8 @@ import {
   type Options,
 } from "@anthropic-ai/claude-agent-sdk";
 import os from "node:os";
+import { accessSync, constants as fsConstants } from "node:fs";
+import path from "node:path";
 import { stdin as processStdin, stdout as processStdout } from "node:process";
 import { zellijMcpServer } from "./tools.js";
 import {
@@ -18,6 +20,66 @@ import {
   isInsidePath,
   type ZellijConfigInfo,
 } from "./zellijConfig.js";
+
+const CLAUDE_EXECUTABLE_ENV_KEYS = [
+  "JELLY_J_CLAUDE_CODE_EXECUTABLE",
+  "CLAUDE_CODE_EXECUTABLE",
+  "CLAUDE_CODE_PATH",
+] as const;
+const CLAUDE_EXECUTABLE_NAMES = process.platform === "win32" ? ["claude.exe"] : ["claude"];
+
+let resolvedClaudeExecutable: string | undefined;
+
+function isExecutableFile(candidate: string): boolean {
+  try {
+    accessSync(candidate, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findInPath(binaryName: string): string | undefined {
+  const pathEnv = process.env.PATH;
+  if (!pathEnv) return undefined;
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, binaryName);
+    if (isExecutableFile(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function getClaudeCodeExecutable(): string {
+  if (resolvedClaudeExecutable) return resolvedClaudeExecutable;
+
+  for (const key of CLAUDE_EXECUTABLE_ENV_KEYS) {
+    const raw = process.env[key];
+    if (!raw) continue;
+    const candidate = raw.trim();
+    if (!candidate) continue;
+    if (isExecutableFile(candidate)) {
+      resolvedClaudeExecutable = candidate;
+      return candidate;
+    }
+  }
+
+  for (const binaryName of CLAUDE_EXECUTABLE_NAMES) {
+    const resolved = findInPath(binaryName);
+    if (resolved) {
+      resolvedClaudeExecutable = resolved;
+      return resolved;
+    }
+  }
+
+  throw new Error(
+    [
+      "Claude Code executable not found.",
+      "Install Claude Code and ensure 'claude' is on PATH, or set one of:",
+      ...CLAUDE_EXECUTABLE_ENV_KEYS.map((key) => `- ${key}`),
+    ].join(os.EOL)
+  );
+}
 
 const BASE_SYSTEM_PROMPT = `You are Jelly J, a friendly Zellij workspace assistant. You live in a
 floating pane and help the user organize their terminal workspace.
@@ -362,6 +424,7 @@ export async function chat(
 
   const options: Options = {
     systemPrompt: buildSystemPrompt(zellijConfigInfo, sessionContextNote),
+    pathToClaudeCodeExecutable: getClaudeCodeExecutable(),
     model,
     tools: { type: "preset", preset: "claude_code" },
     mcpServers: { zellij: zellijMcpServer },
@@ -447,6 +510,7 @@ If nothing worth suggesting, respond with exactly: NOTHING`;
   let result = "";
 
   const options: Options = {
+    pathToClaudeCodeExecutable: getClaudeCodeExecutable(),
     model: "claude-haiku-4-5-20251001",
     maxTurns: 1,
     tools: [],
