@@ -137,6 +137,8 @@ impl ZellijPlugin for State {
             PermissionType::ReadCliPipes,
         ]);
         self.push_trace("requested permissions");
+        request_plugin_state_snapshot();
+        self.push_trace("requested initial plugin state snapshot");
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -146,6 +148,8 @@ impl ZellijPlugin for State {
                 self.permission_denied = false;
                 self.ready = true;
                 self.push_trace("permission granted");
+                request_plugin_state_snapshot();
+                self.push_trace("requested plugin state snapshot after permission grant");
                 self.try_run_toggle();
             }
             Event::PermissionRequestResult(PermissionStatus::Denied) => {
@@ -315,6 +319,7 @@ impl State {
                     return Self::error_response("not_ready", "butler permissions not granted yet");
                 }
                 let Some(state) = self.workspace_state_snapshot() else {
+                    request_plugin_state_snapshot();
                     return Self::error_response(
                         "not_ready",
                         "workspace cache is not ready yet (waiting for PaneUpdate)",
@@ -694,18 +699,35 @@ impl State {
                 self.relocating_updates = 0;
             }
         } else {
-            // Phase 1: open floating terminal pane for Jelly J.
-            // Phase 2 runs in bind_new_jelly_pane when PaneUpdate arrives.
-            self.awaiting_tab = Some(current_tab);
-            self.awaiting_updates = 0;
-            self.awaiting_write_to_new_pane = true;
-            self.known_terminal_ids = self.terminal_ids_snapshot();
+            // Atomic host API: launch + optional stdin write in a single command.
             self.push_trace(format!(
-                "opening_new_jelly_terminal command={}",
+                "launching_new_jelly_terminal atomically command={}",
                 self.launch_command()
             ));
-            open_terminal_floating(".", None);
-            self.awaiting_pane = true;
+            match launch_terminal_pane(
+                Some(FileToOpen::new(".")),
+                Some(PANE_NAME.to_owned()),
+                Some(format!("{}\n", self.launch_command())),
+                None,
+                false,
+                true,
+                false,
+            ) {
+                Ok(PaneId::Terminal(pane_id)) => {
+                    self.push_trace(format!("launched_new_jelly_terminal pane_id={}", pane_id));
+                    show_pane_with_id(PaneId::Terminal(pane_id), true, true);
+                }
+                Ok(pane_id) => {
+                    self.push_trace(format!(
+                        "launched_unexpected_pane_kind pane_id={:?}",
+                        pane_id
+                    ));
+                }
+                Err(error) => {
+                    self.push_trace(format!("launch_terminal_pane_failed error={}", error));
+                }
+            }
+            self.complete_cycle();
         }
     }
 
