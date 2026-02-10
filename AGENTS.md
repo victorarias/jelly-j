@@ -159,6 +159,7 @@ These are implementation constraints agents should treat as hard-won invariants 
      2) plugin-instance fanout (client/plugin counts),
      3) pane open/hide action latency.
    - If latency grows while client/plugin counts remain flat, prioritize plugin event/render feedback loops before host routing changes.
+   - Watch butler counters (`pane_update_count`, `tab_update_count`): runaway growth over a short interval is a strong signal of an update/render loop.
    - Instrument harnesses with per-iteration timing (`toggleDurationMs`) and keep min/max summaries in output.
    - Only escalate to Zellij host changes after reproducing the issue in a minimal isolated loop and ruling out plugin-local causes.
 
