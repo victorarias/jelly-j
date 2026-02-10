@@ -163,6 +163,12 @@ These are implementation constraints agents should treat as hard-won invariants 
    - Instrument harnesses with per-iteration timing (`toggleDurationMs`) and keep min/max summaries in output.
    - Only escalate to Zellij host changes after reproducing the issue in a minimal isolated loop and ruling out plugin-local causes.
 
+14. Clarify "one Jelly J per computer" semantics before implementation.
+   - Desired behavior: one global Jelly J backend process, accessible from every Zellij session.
+   - This does not mean "only one session can host Jelly J UI".
+   - If a second session invokes Jelly J, it should connect to the existing backend and emit a session-switch context signal, not fail with "already running".
+   - If behavior currently contradicts this, treat it as an architecture gap (missing global IPC/control-plane), not a lock-policy success.
+
 ## npm Distribution
 
 Published as `jelly-j` on npm. Build output is ESM with `#!/usr/bin/env bun` shebang and `dist/` is the published payload.
