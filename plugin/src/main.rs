@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use zellij_tile::prelude::*;
 
@@ -17,15 +17,6 @@ struct State {
     permission_result_seen: bool,
     permission_denied: bool,
     pending_toggle: bool,
-    awaiting_pane: bool,
-    awaiting_tab: Option<usize>,
-    awaiting_updates: u16,
-    awaiting_write_to_new_pane: bool,
-    known_terminal_ids: HashSet<u32>,
-    relocating_pane_id: Option<u32>,
-    relocating_target_tab: Option<usize>,
-    relocating_waiting_for_suppressed: bool,
-    relocating_updates: u16,
     launch_command: Option<String>,
     pane_update_count: u64,
     tab_update_count: u64,
@@ -36,8 +27,6 @@ struct State {
     trace: VecDeque<String>,
     last_toggle_epoch_ms: Option<u128>,
     trace_start_epoch_ms: Option<u128>,
-    sticky_jelly_pane_id: Option<u32>,
-    sticky_reveal_attempts: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,15 +91,6 @@ struct ButlerRuntimeState {
     permission_result_seen: bool,
     permission_denied: bool,
     pending_toggle: bool,
-    awaiting_pane: bool,
-    awaiting_tab: Option<usize>,
-    awaiting_updates: u16,
-    awaiting_write_to_new_pane: bool,
-    known_terminal_ids: usize,
-    relocating_pane_id: Option<u32>,
-    relocating_target_tab: Option<usize>,
-    relocating_waiting_for_suppressed: bool,
-    relocating_updates: u16,
     pane_update_count: u64,
     tab_update_count: u64,
     trace_len: usize,
@@ -171,16 +151,7 @@ impl ZellijPlugin for State {
                     self.push_trace("first PaneUpdate received");
                 }
                 self.panes = Some(manifest);
-                if let Some((_, pane)) = self.all_jelly_panes().first() {
-                    self.sticky_jelly_pane_id = Some(pane.id);
-                    self.sticky_reveal_attempts = 0;
-                }
                 self.infer_cached_permission_grant();
-                if self.awaiting_pane {
-                    self.bind_new_jelly_pane();
-                } else if self.relocating_pane_id.is_some() {
-                    self.continue_relocation();
-                }
                 self.try_run_toggle();
             }
             Event::TabUpdate(tab_infos) => {
@@ -210,7 +181,9 @@ impl ZellijPlugin for State {
                     ));
                     Self::respond_to_cli(
                         &source,
-                        Some(Self::ok_response(json!({ "ok": true, "dedup_window": true }))),
+                        Some(Self::ok_response(
+                            json!({ "ok": true, "dedup_window": true }),
+                        )),
                     );
                     return false;
                 }
@@ -471,15 +444,6 @@ impl State {
             permission_result_seen: self.permission_result_seen,
             permission_denied: self.permission_denied,
             pending_toggle: self.pending_toggle,
-            awaiting_pane: self.awaiting_pane,
-            awaiting_tab: self.awaiting_tab,
-            awaiting_updates: self.awaiting_updates,
-            awaiting_write_to_new_pane: self.awaiting_write_to_new_pane,
-            known_terminal_ids: self.known_terminal_ids.len(),
-            relocating_pane_id: self.relocating_pane_id,
-            relocating_target_tab: self.relocating_target_tab,
-            relocating_waiting_for_suppressed: self.relocating_waiting_for_suppressed,
-            relocating_updates: self.relocating_updates,
             pane_update_count: self.pane_update_count,
             tab_update_count: self.tab_update_count,
             trace_len: self.trace.len(),
@@ -495,35 +459,30 @@ impl State {
     }
 
     fn try_run_toggle(&mut self) {
-        if !self.pending_toggle
-            || !self.ready
-            || self.panes.is_none()
-            || self.awaiting_pane
-            || self.relocating_pane_id.is_some()
-        {
+        if !self.pending_toggle || !self.ready || self.panes.is_none() {
             return;
         }
-
         self.pending_toggle = false;
         self.launch_or_toggle();
     }
 
-    fn is_jelly_pane(&self, p: &PaneInfo) -> bool {
+    fn is_jelly_pane(&self, pane: &PaneInfo) -> bool {
         let launch_command = self.launch_command();
-        !p.exited
-            && !p.is_plugin
-            && (p.title == PANE_NAME
-                || p.terminal_command
+        !pane.exited
+            && !pane.is_plugin
+            && (pane.title == PANE_NAME
+                || pane
+                    .terminal_command
                     .as_deref()
-                    .map_or(false, |c| c.contains(launch_command)))
+                    .is_some_and(|command| command.contains(launch_command)))
     }
 
     fn active_tab_index(&self) -> Option<usize> {
         let manifest = self.panes.as_ref()?;
         if let Some((tab_index, _)) = manifest.panes.iter().find(|(_, panes)| {
-            panes
-                .iter()
-                .any(|pane| pane.is_focused && !pane.exited && !pane.is_plugin && !self.is_jelly_pane(pane))
+            panes.iter().any(|pane| {
+                pane.is_focused && !pane.exited && !pane.is_plugin && !self.is_jelly_pane(pane)
+            })
         }) {
             return Some(*tab_index);
         }
@@ -544,22 +503,6 @@ impl State {
         manifest.panes.keys().min().copied()
     }
 
-    fn focused_visible_jelly_pane(&self) -> Option<(usize, PaneInfo)> {
-        self.panes
-            .as_ref()?
-            .panes
-            .iter()
-            .find_map(|(tab_index, panes)| {
-                panes
-                    .iter()
-                    .find(|pane| {
-                        self.is_jelly_pane(pane) && pane.is_focused && !pane.is_suppressed
-                    })
-                    .cloned()
-                    .map(|pane| (*tab_index, pane))
-            })
-    }
-
     fn focusable_non_jelly_terminal_in_tab(&self, tab_index: usize) -> Option<u32> {
         self.panes
             .as_ref()?
@@ -573,13 +516,14 @@ impl State {
     fn all_jelly_panes(&self) -> Vec<(usize, PaneInfo)> {
         self.panes
             .as_ref()
-            .map(|m| {
-                m.panes
+            .map(|manifest| {
+                manifest
+                    .panes
                     .iter()
                     .flat_map(|(tab_index, panes)| {
-                        panes.iter().filter_map(|p| {
-                            if self.is_jelly_pane(p) {
-                                Some((*tab_index, p.clone()))
+                        panes.iter().filter_map(|pane| {
+                            if self.is_jelly_pane(pane) {
+                                Some((*tab_index, pane.clone()))
                             } else {
                                 None
                             }
@@ -590,130 +534,7 @@ impl State {
             .unwrap_or_default()
     }
 
-    fn reset_awaiting(&mut self) {
-        self.awaiting_pane = false;
-        self.awaiting_tab = None;
-        self.awaiting_updates = 0;
-        self.awaiting_write_to_new_pane = false;
-        self.known_terminal_ids.clear();
-    }
-
-    fn reset_relocation(&mut self) {
-        self.relocating_pane_id = None;
-        self.relocating_target_tab = None;
-        self.relocating_waiting_for_suppressed = false;
-        self.relocating_updates = 0;
-    }
-
-    fn complete_cycle(&mut self) {
-        self.push_trace("complete_cycle");
-        self.reset_awaiting();
-        self.reset_relocation();
-        self.try_run_toggle();
-    }
-
-    fn find_pane_by_id(&self, pane_id: u32) -> Option<(usize, PaneInfo)> {
-        self.panes
-            .as_ref()?
-            .panes
-            .iter()
-            .find_map(|(tab_index, panes)| {
-                panes
-                    .iter()
-                    .find(|p| p.id == pane_id && !p.exited && !p.is_plugin)
-                    .cloned()
-                    .map(|pane| (*tab_index, pane))
-            })
-    }
-
-    fn continue_relocation(&mut self) {
-        let Some(pane_id) = self.relocating_pane_id else {
-            return;
-        };
-        let Some(target_tab) = self.relocating_target_tab else {
-            self.complete_cycle();
-            return;
-        };
-
-        let Some((current_tab, pane)) = self.find_pane_by_id(pane_id) else {
-            self.relocating_updates = self.relocating_updates.saturating_add(1);
-            if self.relocating_updates % 100 == 0 {
-                self.push_trace(format!(
-                    "relocating_waiting_for_pane id={} updates={}",
-                    pane_id, self.relocating_updates
-                ));
-            }
-            if self.relocating_updates > 1200 {
-                self.complete_cycle();
-            }
-            return;
-        };
-
-        if current_tab != target_tab {
-            self.relocating_updates = self.relocating_updates.saturating_add(1);
-            if self.relocating_updates % 100 == 0 {
-                self.push_trace(format!(
-                    "relocating_waiting_for_target_tab id={} current={} target={} updates={}",
-                    pane_id, current_tab, target_tab, self.relocating_updates
-                ));
-            }
-            if self.relocating_updates > 1200 {
-                self.complete_cycle();
-            }
-            return;
-        }
-
-        let pane_ref = PaneId::Terminal(pane_id);
-        if self.relocating_waiting_for_suppressed {
-            if pane.is_suppressed {
-                show_pane_with_id(pane_ref, true, true);
-                self.complete_cycle();
-            } else {
-                self.relocating_updates = self.relocating_updates.saturating_add(1);
-                if self.relocating_updates % 30 == 0 {
-                    hide_pane_with_id(pane_ref);
-                }
-                if self.relocating_updates > 1200 {
-                    self.complete_cycle();
-                }
-            }
-            return;
-        }
-
-        if pane.is_suppressed {
-            show_pane_with_id(pane_ref, true, true);
-            self.complete_cycle();
-        } else if pane.is_floating {
-            show_pane_with_id(pane_ref, true, true);
-            self.complete_cycle();
-        } else {
-            // Pane arrived tiled. Suppress first, then restore as floating.
-            hide_pane_with_id(pane_ref);
-            self.relocating_waiting_for_suppressed = true;
-            self.relocating_updates = 0;
-        }
-    }
-
     fn launch_or_toggle(&mut self) {
-        if let Some((tab_index, focused_jelly)) = self.focused_visible_jelly_pane() {
-            self.push_trace(format!(
-                "focused_jelly_fast_hide id={} tab={}",
-                focused_jelly.id, tab_index
-            ));
-            if let Some(target_focus_id) = self.focusable_non_jelly_terminal_in_tab(tab_index) {
-                focus_terminal_pane(target_focus_id, true, false);
-                self.push_trace(format!(
-                    "focused_jelly_fast_hide shifted_focus_to={}",
-                    target_focus_id
-                ));
-            }
-            self.sticky_jelly_pane_id = Some(focused_jelly.id);
-            self.sticky_reveal_attempts = 0;
-            hide_pane_with_id(PaneId::Terminal(focused_jelly.id));
-            self.complete_cycle();
-            return;
-        }
-
         let current_tab = self.active_tab_index().unwrap_or(0);
         self.push_trace(format!("launch_or_toggle current_tab={}", current_tab));
 
@@ -723,200 +544,73 @@ impl State {
                 "found_existing_jelly_panes count={}",
                 jelly_panes.len()
             ));
-            // Keep exactly one Jelly J pane per session to prevent pane/process buildup.
+
             let keep_idx = jelly_panes
                 .iter()
                 .position(|(tab, _)| *tab == current_tab)
                 .or_else(|| jelly_panes.iter().position(|(_, pane)| pane.is_focused))
                 .unwrap_or(0);
-            let (_, keep_pane) = jelly_panes.remove(keep_idx);
-            self.sticky_jelly_pane_id = Some(keep_pane.id);
-            self.sticky_reveal_attempts = 0;
+            let (keep_tab, keep_pane) = jelly_panes.remove(keep_idx);
+
             for (_, extra_pane) in jelly_panes {
                 self.push_trace(format!("closing_extra_jelly_pane id={}", extra_pane.id));
                 close_terminal_pane(extra_pane.id);
             }
 
-            let pane_id = PaneId::Terminal(keep_pane.id);
-            if keep_pane.is_suppressed {
-                // Keep toggles responsive: request move + show immediately, no update-loop waiting.
-                self.push_trace(format!(
-                    "showing_jelly_pane id={} move_to_tab={} via_focus_terminal_pane",
-                    keep_pane.id, current_tab
-                ));
-                break_panes_to_tab_with_index(&[pane_id], current_tab, false);
-                focus_terminal_pane(keep_pane.id, true, false);
-            } else {
+            let keep_ref = PaneId::Terminal(keep_pane.id);
+            let visible_in_current_tab = keep_tab == current_tab && !keep_pane.is_suppressed;
+            if visible_in_current_tab {
+                if keep_pane.is_focused {
+                    if let Some(target_focus_id) =
+                        self.focusable_non_jelly_terminal_in_tab(current_tab)
+                    {
+                        focus_terminal_pane(target_focus_id, true, false);
+                        self.push_trace(format!(
+                            "hiding_jelly shifted_focus_to={}",
+                            target_focus_id
+                        ));
+                    }
+                }
                 self.push_trace(format!("hiding_jelly_pane id={}", keep_pane.id));
-                hide_pane_with_id(pane_id);
-            }
-            self.complete_cycle();
-        } else {
-            if let Some(sticky_pane_id) = self.sticky_jelly_pane_id {
-                if self.sticky_reveal_attempts < 2 {
-                    self.sticky_reveal_attempts = self.sticky_reveal_attempts.saturating_add(1);
-                    self.push_trace(format!(
-                        "revealing_sticky_jelly_pane id={} attempt={} via_focus_terminal_pane",
-                        sticky_pane_id, self.sticky_reveal_attempts
-                    ));
-                    focus_terminal_pane(sticky_pane_id, true, false);
-                    self.complete_cycle();
-                    return;
-                }
+                hide_pane_with_id(keep_ref);
+            } else {
                 self.push_trace(format!(
-                    "sticky_jelly_reveal_exhausted id={} attempts={}",
-                    sticky_pane_id, self.sticky_reveal_attempts
+                    "showing_jelly_pane id={} from_tab={} to_tab={} via_focus_terminal_pane",
+                    keep_pane.id, keep_tab, current_tab
                 ));
+                if keep_tab != current_tab {
+                    break_panes_to_tab_with_index(&[keep_ref], current_tab, false);
+                }
+                focus_terminal_pane(keep_pane.id, true, false);
             }
-            // Atomic host API: launch + optional stdin write in a single command.
-            self.push_trace(format!(
-                "launching_new_jelly_terminal atomically command={}",
-                self.launch_command()
-            ));
-            match launch_terminal_pane(
-                Some(FileToOpen::new(".")),
-                Some(PANE_NAME.to_owned()),
-                Some(format!("{}\n", self.launch_command())),
-                None,
-                false,
-                true,
-                false,
-            ) {
-                Ok(PaneId::Terminal(pane_id)) => {
-                    self.push_trace(format!("launched_new_jelly_terminal pane_id={}", pane_id));
-                    self.sticky_jelly_pane_id = Some(pane_id);
-                    self.sticky_reveal_attempts = 0;
-                    show_pane_with_id(PaneId::Terminal(pane_id), true, true);
-                }
-                Ok(pane_id) => {
-                    self.push_trace(format!(
-                        "launched_unexpected_pane_kind pane_id={:?}",
-                        pane_id
-                    ));
-                }
-                Err(error) => {
-                    self.push_trace(format!("launch_terminal_pane_failed error={}", error));
-                }
-            }
-            self.complete_cycle();
+            return;
         }
-    }
 
-    fn bind_new_jelly_pane(&mut self) {
-        let panes_by_tab = match self.panes.as_ref() {
-            Some(manifest) => manifest.panes.clone(),
-            None => return,
-        };
-
-        let target_tab = self.awaiting_tab.or_else(|| self.active_tab_index());
-
-        let all_new_terminals: Vec<(usize, PaneInfo)> = panes_by_tab
-            .iter()
-            .flat_map(|(tab_index, panes)| {
-                panes.iter().filter_map(|p| {
-                    if !p.is_plugin && !p.exited && !self.known_terminal_ids.contains(&p.id) {
-                        Some((*tab_index, p.clone()))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
-
-        let candidate = if let Some(target_tab) = target_tab {
-            all_new_terminals
-                .iter()
-                .find(|(tab_index, pane)| {
-                    *tab_index == target_tab && pane.is_floating && self.is_jelly_pane(pane)
-                })
-                .or_else(|| {
-                    all_new_terminals
-                        .iter()
-                        .find(|(_, pane)| pane.is_floating && self.is_jelly_pane(pane))
-                })
-                .or_else(|| {
-                    all_new_terminals
-                        .iter()
-                        .find(|(tab_index, pane)| *tab_index == target_tab && pane.is_floating)
-                })
-                .or_else(|| {
-                    if self.awaiting_updates >= 4 {
-                        all_new_terminals
-                            .iter()
-                            .find(|(tab_index, _)| *tab_index == target_tab)
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    if self.awaiting_updates >= 6 {
-                        all_new_terminals.first()
-                    } else {
-                        None
-                    }
-                })
-                .cloned()
-        } else {
-            all_new_terminals
-                .iter()
-                .find(|(_, pane)| pane.is_floating && self.is_jelly_pane(pane))
-                .or_else(|| all_new_terminals.iter().find(|(_, pane)| pane.is_floating))
-                .or_else(|| {
-                    if self.awaiting_updates >= 6 {
-                        all_new_terminals.first()
-                    } else {
-                        None
-                    }
-                })
-                .cloned()
-        };
-
-        if let Some((created_in_tab, pane)) = candidate {
-            let id = pane.id;
-            self.push_trace(format!(
-                "bound_new_pane id={} tab={} floating={} title={} cmd={:?}",
-                id, created_in_tab, pane.is_floating, pane.title, pane.terminal_command
-            ));
-            if let Some(target_tab) = target_tab {
-                if created_in_tab != target_tab {
-                    self.push_trace(format!(
-                        "moving_new_pane_to_target_tab id={} from={} to={}",
-                        id, created_in_tab, target_tab
-                    ));
-                    break_panes_to_tab_with_index(&[PaneId::Terminal(id)], target_tab, false);
-                    self.relocating_pane_id = Some(id);
-                    self.relocating_target_tab = Some(target_tab);
-                    self.relocating_waiting_for_suppressed = false;
-                    self.relocating_updates = 0;
-                }
+        self.push_trace(format!(
+            "launching_new_jelly_terminal atomically command={}",
+            self.launch_command()
+        ));
+        match launch_terminal_pane(
+            Some(FileToOpen::new(".")),
+            Some(PANE_NAME.to_owned()),
+            Some(format!("{}\n", self.launch_command())),
+            None,
+            false,
+            true,
+            false,
+        ) {
+            Ok(PaneId::Terminal(pane_id)) => {
+                self.push_trace(format!("launched_new_jelly_terminal pane_id={}", pane_id));
+                focus_terminal_pane(pane_id, true, false);
             }
-            rename_terminal_pane(id, PANE_NAME);
-            if self.awaiting_write_to_new_pane {
+            Ok(pane_id) => {
                 self.push_trace(format!(
-                    "writing_command_to_new_pane id={} command={}",
-                    id,
-                    self.launch_command()
-                ));
-                write_chars_to_pane_id(
-                    &format!("{}\n", self.launch_command()),
-                    PaneId::Terminal(id),
-                );
-            }
-            show_pane_with_id(PaneId::Terminal(id), true, true);
-            self.complete_cycle();
-        } else {
-            // Recover if no matching pane arrives after enough manifest updates.
-            self.awaiting_updates = self.awaiting_updates.saturating_add(1);
-            if self.awaiting_updates % 100 == 0 {
-                self.push_trace(format!(
-                    "awaiting_new_pane updates={} candidates={}",
-                    self.awaiting_updates,
-                    all_new_terminals.len()
+                    "launched_unexpected_pane_kind pane_id={:?}",
+                    pane_id
                 ));
             }
-            if self.awaiting_updates > 1200 {
-                self.push_trace("awaiting_new_pane timed_out");
-                self.complete_cycle();
+            Err(error) => {
+                self.push_trace(format!("launch_terminal_pane_failed error={}", error));
             }
         }
     }

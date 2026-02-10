@@ -71,7 +71,7 @@ Heartbeat:
 A WASM plugin using `zellij-tile` (local `main`) that provides persistent `Alt+j` behavior and IPC:
 
 - Lives for the whole session (does not close itself per keypress)
-- Handles `toggle` pipe messages for show/hide/relocate behavior
+- Handles `toggle` pipe messages for show/hide/focus behavior
 - Handles `request` pipe messages for control ops (`ping`, `get_state`, rename/show/hide)
 - Hides its own pane in `render()` so no plugin pane is visible
 
@@ -84,14 +84,13 @@ State machine:
 Key flags:
 - `ready` (permissions granted)
 - `pending_toggle` (coalesced toggle requests)
-- `awaiting_pane` (waiting for newly opened terminal to appear)
-- relocation fields (`relocating_*`) for cross-tab floating restore sequence
+- `pane_update_count` / `tab_update_count` (event-flow observability)
 
 ## Key Design Decisions
 
 - Persistent butler: single long-lived plugin instance.
 - `MessagePlugin` keybind for `Alt+j` toggle delivery.
-- `write_chars_to_pane_id` for deterministic command injection into the new pane.
+- Atomic `launch_terminal_pane(..., stdin_write=Some(\"jelly-j\\n\"), ...)` for launch + command injection.
 - Pipe IPC (`zellij pipe`) for no-focus-switch tab/pane operations.
 - Global conversation continuity in `~/.jelly-j/state.json` (intentional, shared across zellij sessions).
 - Global singleton process lock in `~/.jelly-j/agent.lock.json` (one jelly-j process per computer).
@@ -118,38 +117,34 @@ These are implementation constraints agents should treat as hard-won invariants 
    - `zellij pipe --name toggle` may deliver duplicate events for the same CLI request.
    - Store last CLI pipe id and no-op duplicates to avoid double-toggle flicker.
 
-5. Prefer floating terminal + targeted stdin write over floating command pane for launch.
-   - Reliable path here: `open_terminal_floating(...)` then `write_chars_to_pane_id(...)`.
-   - The attempted `open_command_pane_floating(...)` path was not reliable for this workflow in current environment.
+5. Prefer atomic terminal launch with inline stdin write over multi-step launch state machines.
+   - Reliable path here: `launch_terminal_pane(..., stdin_write=Some(\"jelly-j\\n\"), ...)`.
+   - Avoid `awaiting_pane`/`relocating_*` loops unless a future regression proves they are needed.
 
-6. Update-count timeouts must tolerate high event rates.
-   - `PaneUpdate` frequency on `main` can be very high.
-   - Small update-count thresholds cause false timeout before pane binding.
-
-7. Harness runs must seed plugin permission cache for URL variants.
+6. Harness runs must seed plugin permission cache for URL variants.
    - Cache file: macOS `~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl`
    - Seed both path and URL forms (`/path`, `file:/path`, `file:///path`, etc.) to avoid prompt-driven nondeterminism.
 
-8. Always test against the deployed wasm artifact, not just local build output.
+7. Always test against the deployed wasm artifact, not just local build output.
    - After plugin build, copy `plugin/target/wasm32-wasip1/release/jelly-j.wasm` to `~/.config/zellij/plugins/jelly-j.wasm` before harness/e2e.
 
-9. Use butler trace/state as first-line diagnostics.
+8. Use butler trace/state as first-line diagnostics.
    - Capture `get_trace` and `get_state` before cleanup in failing harness runs.
    - Prefer trace evidence over assumptions about zellij event ordering.
 
-10. Preserve global singleton semantics in REPL process management.
+9. Preserve global singleton semantics in REPL process management.
    - Startup must acquire the global lock before initializing interactive loop.
    - Shutdown/fatal paths must release lock best-effort.
    - `Ctrl-C` must not terminate Jelly J.
    - `exit`/`quit` input must stay disabled (single global agent semantics).
    - Unexpected stdin close/signals should relaunch Jelly J in a fresh pane.
 
-11. Never use raw `zellij pipe` for ops/restart flows without a timeout.
+10. Never use raw `zellij pipe` for ops/restart flows without a timeout.
    - `zellij pipe` can block if a plugin-side CLI pipe is never unblocked.
    - For operational restart, use `npm run ops:restart` (timeout-bounded, lock-aware, no unbounded pipe wait).
    - In code, map pipe timeouts to explicit `ZellijPipeError` with `code="timeout"` and surface actionable errors.
 
-12. Keybind-delivered toggle pipes can be duplicated in tight succession.
+11. Keybind-delivered toggle pipes can be duplicated in tight succession.
    - Keep a short dedup window in the plugin toggle handler to avoid hide-then-show on a single Alt+j press.
    - Do not rely only on CLI pipe-id dedup; keybind sources have no pipe id.
 

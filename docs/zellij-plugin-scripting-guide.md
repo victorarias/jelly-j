@@ -8,7 +8,7 @@ Scope:
 - Persistent plugin lifecycle and event ordering
 - Keybinding semantics for `MessagePlugin`
 - Pipe protocol (`toggle` + `request`) and response contracts
-- Pane relocation invariants to keep Jelly J floating across tabs
+- Deterministic toggle invariants for single-pane behavior
 - Test strategy for `Alt+j` stability
 
 Version notes:
@@ -66,7 +66,7 @@ Guidelines:
 ## 4) Pipe Protocol
 
 Two names are reserved:
-- `toggle`: keybinding-triggered open/hide/relocate cycle.
+- `toggle`: keybinding-triggered open/hide/focus cycle.
 - `request`: JSON RPC-like operation channel (CLI/Node side).
 
 CLI form:
@@ -101,16 +101,19 @@ Because plugin panes are hidden and not used as focus anchors:
 
 This avoids stale-target toggles in multi-tab sessions.
 
-## 7) Floating Relocation Invariant
+## 7) Deterministic Toggle Invariant
 
-To preserve floating behavior when moving Jelly J between tabs:
-1. `break_panes_to_tab_with_index`
-2. `hide_pane_with_id`
-3. `show_pane_with_id(..., true, true)`
+Toggle behavior must avoid multi-event wait loops:
+1. Snapshot pane manifest.
+2. Keep exactly one Jelly pane; close extras.
+3. If Jelly is visible in the current tab, hide it.
+4. Otherwise move it to the current tab (if needed) and reveal via `focus_terminal_pane(..., true, false)`.
+5. If none exists, launch atomically with `launch_terminal_pane(..., stdin_write=Some("jelly-j\\n"), floating=true, ...)`.
 
 Why:
-- Suppress-before-break can cause destination docking as tiled.
-- Re-show with floating flag enforces floating restoration.
+- Prevents stale `awaiting_*` / `relocating_*` state.
+- Keeps `Alt+j` responsiveness bounded to a single toggle pass.
+- Enforces one Jelly pane per session.
 
 ## 8) Request Ops
 
@@ -132,8 +135,8 @@ All state-changing ops require permissions to be granted.
 If users report `Alt+j` instability:
 1. Verify keybind uses `MessagePlugin` and `name "toggle"`.
 2. Verify plugin remains persistent (`hide_self` only, no per-toggle `close_self`).
-3. Verify relocation order is `break -> hide -> show`.
-4. Verify `show_pane_with_id(..., true, true)` is used on `main` target.
+3. Verify toggle path does not depend on `awaiting_*` / `relocating_*` loops.
+4. Verify reveal path uses `focus_terminal_pane(..., true, false)` and keeps one Jelly pane.
 5. Re-run multi-tab e2e stress tests and inspect `dump-layout` output.
 
 ## 10) Test Requirements
@@ -157,7 +160,8 @@ Primary references:
 - `break_panes_to_tab_with_index`: https://docs.rs/zellij-tile/latest/zellij_tile/shim/fn.break_panes_to_tab_with_index.html
 - `hide_pane_with_id`: https://docs.rs/zellij-tile/latest/zellij_tile/shim/fn.hide_pane_with_id.html
 - `show_pane_with_id`: https://zellij.dev/documentation/plugin-api-commands
-- `write_chars_to_pane_id`: https://docs.rs/zellij-tile/latest/zellij_tile/shim/fn.write_chars_to_pane_id.html
+- `focus_terminal_pane`: https://docs.rs/zellij-tile/latest/zellij_tile/shim/fn.focus_terminal_pane.html
+- `launch_terminal_pane`: https://docs.rs/zellij-tile/latest/zellij_tile/shim/fn.launch_terminal_pane.html
 - Zellij source inspected locally: `/Users/victor.arias/projects/zellij` (commit `97744ad0`, branch `main`)
 
 ## 12) Maintenance Workflow

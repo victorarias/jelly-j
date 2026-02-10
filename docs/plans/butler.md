@@ -45,7 +45,7 @@ Butler:  load → permission → idle (caching PaneUpdate + TabUpdate)
          pipe("request") → execute → respond → idle
 ```
 
-The toggle sub-state-machine (awaiting_pane, relocating) stays identical. The only structural change is removing `done`/`close_self()` and adding `pipe()`.
+This plan assumption was later superseded: the launcher-era toggle sub-state-machine (`awaiting_pane`, `relocating`) was removed in favor of a single-pass deterministic toggle flow.
 
 **Focused tab detection**: Currently relies on finding a focused plugin pane (the launcher itself). Won't work for a background plugin. Prefer `TabUpdate` (`TabInfo.active`) and keep pane-focus fallback when `TabUpdate` is absent in headless/background runs:
 ```rust
