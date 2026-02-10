@@ -17,6 +17,7 @@ struct State {
     permission_result_seen: bool,
     permission_denied: bool,
     pending_toggle: bool,
+    jelly_pane_id: Option<u32>,
     launch_command: Option<String>,
     pane_update_count: u64,
     tab_update_count: u64,
@@ -94,6 +95,7 @@ struct ButlerRuntimeState {
     pane_update_count: u64,
     tab_update_count: u64,
     trace_len: usize,
+    jelly_pane_id: Option<u32>,
     last_cli_toggle_pipe_id: Option<String>,
     launch_command: String,
 }
@@ -151,6 +153,12 @@ impl ZellijPlugin for State {
                     self.push_trace("first PaneUpdate received");
                 }
                 self.panes = Some(manifest);
+                if let Some(pane_id) = self.jelly_pane_id {
+                    if self.find_terminal_pane_by_id(pane_id).is_none() {
+                        self.push_trace(format!("tracked_jelly_pane_missing id={}", pane_id));
+                        self.jelly_pane_id = None;
+                    }
+                }
                 self.infer_cached_permission_grant();
                 self.try_run_toggle();
             }
@@ -447,6 +455,7 @@ impl State {
             pane_update_count: self.pane_update_count,
             tab_update_count: self.tab_update_count,
             trace_len: self.trace.len(),
+            jelly_pane_id: self.jelly_pane_id,
             last_cli_toggle_pipe_id: self.last_cli_toggle_pipe_id.clone(),
             launch_command: self.launch_command().to_owned(),
         };
@@ -534,11 +543,41 @@ impl State {
             .unwrap_or_default()
     }
 
+    fn find_terminal_pane_by_id(&self, pane_id: u32) -> Option<(usize, PaneInfo)> {
+        self.panes
+            .as_ref()?
+            .panes
+            .iter()
+            .find_map(|(tab_index, panes)| {
+                panes
+                    .iter()
+                    .find(|pane| pane.id == pane_id && !pane.is_plugin && !pane.exited)
+                    .cloned()
+                    .map(|pane| (*tab_index, pane))
+            })
+    }
+
     fn launch_or_toggle(&mut self) {
         let current_tab = self.active_tab_index().unwrap_or(0);
         self.push_trace(format!("launch_or_toggle current_tab={}", current_tab));
 
         let mut jelly_panes = self.all_jelly_panes();
+        if let Some(tracked_pane_id) = self.jelly_pane_id {
+            if let Some((tracked_tab, tracked_pane)) =
+                self.find_terminal_pane_by_id(tracked_pane_id)
+            {
+                if !jelly_panes
+                    .iter()
+                    .any(|(_, pane)| pane.id == tracked_pane_id)
+                {
+                    self.push_trace(format!(
+                        "using_tracked_jelly_pane id={} tab={} despite_title_or_command_drift",
+                        tracked_pane_id, tracked_tab
+                    ));
+                    jelly_panes.push((tracked_tab, tracked_pane));
+                }
+            }
+        }
         if !jelly_panes.is_empty() {
             self.push_trace(format!(
                 "found_existing_jelly_panes count={}",
@@ -547,10 +586,12 @@ impl State {
 
             let keep_idx = jelly_panes
                 .iter()
-                .position(|(tab, _)| *tab == current_tab)
+                .position(|(_, pane)| self.jelly_pane_id == Some(pane.id))
+                .or_else(|| jelly_panes.iter().position(|(tab, _)| *tab == current_tab))
                 .or_else(|| jelly_panes.iter().position(|(_, pane)| pane.is_focused))
                 .unwrap_or(0);
             let (keep_tab, keep_pane) = jelly_panes.remove(keep_idx);
+            self.jelly_pane_id = Some(keep_pane.id);
 
             for (_, extra_pane) in jelly_panes {
                 self.push_trace(format!("closing_extra_jelly_pane id={}", extra_pane.id));
@@ -575,13 +616,13 @@ impl State {
                 hide_pane_with_id(keep_ref);
             } else {
                 self.push_trace(format!(
-                    "showing_jelly_pane id={} from_tab={} to_tab={} via_focus_terminal_pane",
+                    "showing_jelly_pane id={} from_tab={} to_tab={} via_show_pane_with_id",
                     keep_pane.id, keep_tab, current_tab
                 ));
                 if keep_tab != current_tab {
                     break_panes_to_tab_with_index(&[keep_ref], current_tab, false);
                 }
-                focus_terminal_pane(keep_pane.id, true, false);
+                show_pane_with_id(keep_ref, true, true);
             }
             return;
         }
@@ -601,7 +642,8 @@ impl State {
         ) {
             Ok(PaneId::Terminal(pane_id)) => {
                 self.push_trace(format!("launched_new_jelly_terminal pane_id={}", pane_id));
-                focus_terminal_pane(pane_id, true, false);
+                self.jelly_pane_id = Some(pane_id);
+                show_pane_with_id(PaneId::Terminal(pane_id), true, true);
             }
             Ok(pane_id) => {
                 self.push_trace(format!(
