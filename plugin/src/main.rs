@@ -560,6 +560,16 @@ impl State {
             })
     }
 
+    fn focusable_non_jelly_terminal_in_tab(&self, tab_index: usize) -> Option<u32> {
+        self.panes
+            .as_ref()?
+            .panes
+            .get(&tab_index)?
+            .iter()
+            .find(|pane| !pane.is_plugin && !pane.exited && !self.is_jelly_pane(pane))
+            .map(|pane| pane.id)
+    }
+
     fn all_jelly_panes(&self) -> Vec<(usize, PaneInfo)> {
         self.panes
             .as_ref()
@@ -690,6 +700,13 @@ impl State {
                 "focused_jelly_fast_hide id={} tab={}",
                 focused_jelly.id, tab_index
             ));
+            if let Some(target_focus_id) = self.focusable_non_jelly_terminal_in_tab(tab_index) {
+                focus_terminal_pane(target_focus_id, true, false);
+                self.push_trace(format!(
+                    "focused_jelly_fast_hide shifted_focus_to={}",
+                    target_focus_id
+                ));
+            }
             self.sticky_jelly_pane_id = Some(focused_jelly.id);
             self.sticky_reveal_attempts = 0;
             hide_pane_with_id(PaneId::Terminal(focused_jelly.id));
@@ -724,11 +741,11 @@ impl State {
             if keep_pane.is_suppressed {
                 // Keep toggles responsive: request move + show immediately, no update-loop waiting.
                 self.push_trace(format!(
-                    "showing_jelly_pane id={} move_to_tab={}",
+                    "showing_jelly_pane id={} move_to_tab={} via_focus_terminal_pane",
                     keep_pane.id, current_tab
                 ));
                 break_panes_to_tab_with_index(&[pane_id], current_tab, false);
-                show_pane_with_id(pane_id, true, true);
+                focus_terminal_pane(keep_pane.id, true, false);
             } else {
                 self.push_trace(format!("hiding_jelly_pane id={}", keep_pane.id));
                 hide_pane_with_id(pane_id);
@@ -739,10 +756,10 @@ impl State {
                 if self.sticky_reveal_attempts < 2 {
                     self.sticky_reveal_attempts = self.sticky_reveal_attempts.saturating_add(1);
                     self.push_trace(format!(
-                        "revealing_sticky_jelly_pane id={} attempt={}",
+                        "revealing_sticky_jelly_pane id={} attempt={} via_focus_terminal_pane",
                         sticky_pane_id, self.sticky_reveal_attempts
                     ));
-                    show_pane_with_id(PaneId::Terminal(sticky_pane_id), true, true);
+                    focus_terminal_pane(sticky_pane_id, true, false);
                     self.complete_cycle();
                     return;
                 }
