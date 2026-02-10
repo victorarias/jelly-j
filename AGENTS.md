@@ -140,7 +140,9 @@ These are implementation constraints agents should treat as hard-won invariants 
 10. Preserve global singleton semantics in REPL process management.
    - Startup must acquire the global lock before initializing interactive loop.
    - Shutdown/fatal paths must release lock best-effort.
-   - `Ctrl-C` should not terminate Jelly J by default; explicit `exit`/`quit` controls termination.
+   - `Ctrl-C` must not terminate Jelly J.
+   - `exit`/`quit` input must stay disabled (single global agent semantics).
+   - Unexpected stdin close/signals should relaunch Jelly J in a fresh pane.
 
 11. Never use raw `zellij pipe` for ops/restart flows without a timeout.
    - `zellij pipe` can block if a plugin-side CLI pipe is never unblocked.

@@ -78,7 +78,9 @@ keybinds {
 - Jelly J enforces a global process lock at `~/.jelly-j/agent.lock.json`.
 - Only one `jelly-j` process can run per computer at a time.
 - If a second instance starts, it exits immediately and tells you where the active one is.
-- `Ctrl-C` does not exit Jelly J. Use `exit` / `quit` to stop it.
+- `Ctrl-C` does not exit Jelly J.
+- `exit` / `quit` input is intentionally disabled.
+- If stdin/pane closes unexpectedly, Jelly J auto-restarts into a fresh floating pane.
 - If restart gets stuck in a weird state, run `npm run ops:restart` (lock-aware, timeout-bounded).
 
 ### Fish shell helper (optional)

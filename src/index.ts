@@ -1,4 +1,6 @@
+import { execFile } from "node:child_process";
 import { createInterface } from "node:readline";
+import { promisify } from "node:util";
 import { chat } from "./agent.js";
 import {
   handleSlashCommand,
@@ -24,6 +26,9 @@ import {
   type UiState,
 } from "./ui.js";
 
+const execFileAsync = promisify(execFile);
+const RESTART_TIMEOUT_MS = 5_000;
+const EXIT_ALIASES = new Set(["exit", "bye", "quit", "q"]);
 const display = (text: string) => process.stdout.write(text);
 
 async function main(): Promise<void> {
@@ -57,6 +62,7 @@ async function main(): Promise<void> {
   let currentModel: ModelAlias = "opus";
   let uiState: UiState = "idle";
   let shuttingDown = false;
+  let restarting = false;
 
   if (
     persistedState.zellijSession &&
@@ -75,9 +81,7 @@ async function main(): Promise<void> {
     });
   }
 
-  async function shutdown(exitCode: number): Promise<void> {
-    if (shuttingDown) return;
-    shuttingDown = true;
+  async function flushStateAndReleaseLock(): Promise<void> {
     stopHeartbeat();
     try {
       await persistState();
@@ -89,7 +93,35 @@ async function main(): Promise<void> {
     } catch {
       // best effort only
     }
+  }
+
+  async function shutdown(exitCode: number): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await flushStateAndReleaseLock();
     process.exit(exitCode);
+  }
+
+  async function restartInFreshPane(reason: string): Promise<void> {
+    if (restarting || shuttingDown) return;
+    restarting = true;
+    shuttingDown = true;
+    await flushStateAndReleaseLock();
+
+    try {
+      await execFileAsync(
+        "zellij",
+        ["run", "-f", "--name", "Jelly J", "--", "jelly-j"],
+        { timeout: RESTART_TIMEOUT_MS }
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      printError(`automatic restart failed (${reason}): ${message}`, display);
+      process.exit(1);
+      return;
+    }
+
+    process.exit(0);
   }
 
   display(renderWelcome(currentModel));
@@ -105,9 +137,12 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (["exit", "bye", "quit", "q"].includes(input.toLowerCase())) {
-      printNote("See you!", display);
-      rl.close();
+    if (EXIT_ALIASES.has(input.toLowerCase())) {
+      printNote(
+        'exit/quit is disabled in global-singleton mode. Use Alt+j to hide/show Jelly J.',
+        display
+      );
+      rl.prompt();
       return;
     }
 
@@ -207,12 +242,12 @@ async function main(): Promise<void> {
   });
 
   rl.on("close", () => {
-    void shutdown(0);
+    void restartInFreshPane("stdin closed");
   });
 
   const handleSigint = () => {
     display("\n");
-    printNote('Ctrl-C does not exit Jelly J. Type "exit" to close it.', display);
+    printNote("Ctrl-C does not exit Jelly J in global-singleton mode.", display);
     rl.prompt();
   };
 
@@ -222,7 +257,11 @@ async function main(): Promise<void> {
   process.on("SIGINT", handleSigint);
 
   process.on("SIGTERM", () => {
-    rl.close();
+    void restartInFreshPane("SIGTERM");
+  });
+
+  process.on("SIGHUP", () => {
+    void restartInFreshPane("SIGHUP");
   });
 }
 
