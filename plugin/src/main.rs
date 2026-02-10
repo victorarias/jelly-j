@@ -7,7 +7,7 @@ use zellij_tile::prelude::*;
 const PANE_NAME: &str = "Jelly J";
 const COMMAND: &str = "jelly-j";
 const TRACE_LIMIT: usize = 200;
-const TOGGLE_DEDUP_WINDOW_MS: u128 = 250;
+const TOGGLE_DEDUP_WINDOW_MS: u128 = 100;
 
 #[derive(Default)]
 struct State {
@@ -35,6 +35,9 @@ struct State {
     trace_seq: u64,
     trace: VecDeque<String>,
     last_toggle_epoch_ms: Option<u128>,
+    trace_start_epoch_ms: Option<u128>,
+    sticky_jelly_pane_id: Option<u32>,
+    sticky_reveal_attempts: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +171,10 @@ impl ZellijPlugin for State {
                     self.push_trace("first PaneUpdate received");
                 }
                 self.panes = Some(manifest);
+                if let Some((_, pane)) = self.all_jelly_panes().first() {
+                    self.sticky_jelly_pane_id = Some(pane.id);
+                    self.sticky_reveal_attempts = 0;
+                }
                 self.infer_cached_permission_grant();
                 if self.awaiting_pane {
                     self.bind_new_jelly_pane();
@@ -277,12 +284,19 @@ impl State {
     }
 
     fn push_trace(&mut self, message: impl Into<String>) {
+        let now_ms = Self::now_epoch_millis();
+        let start_ms = self.trace_start_epoch_ms.get_or_insert(now_ms);
+        let delta_ms = now_ms.saturating_sub(*start_ms);
         self.trace_seq = self.trace_seq.saturating_add(1);
         if self.trace.len() >= TRACE_LIMIT {
             self.trace.pop_front();
         }
-        self.trace
-            .push_back(format!("{:04} {}", self.trace_seq, message.into()));
+        self.trace.push_back(format!(
+            "{:04} +{}ms {}",
+            self.trace_seq,
+            delta_ms,
+            message.into()
+        ));
     }
 
     fn trace_snapshot(&self, limit: Option<usize>) -> Vec<String> {
@@ -530,16 +544,6 @@ impl State {
         manifest.panes.keys().min().copied()
     }
 
-    fn find_jelly_in_tab(&self, tab_index: usize) -> Option<PaneInfo> {
-        self.panes
-            .as_ref()?
-            .panes
-            .get(&tab_index)?
-            .iter()
-            .find(|p| self.is_jelly_pane(p))
-            .cloned()
-    }
-
     fn focused_visible_jelly_pane(&self) -> Option<(usize, PaneInfo)> {
         self.panes
             .as_ref()?
@@ -572,20 +576,6 @@ impl State {
                         })
                     })
                     .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    }
-
-    fn terminal_ids_snapshot(&self) -> HashSet<u32> {
-        self.panes
-            .as_ref()
-            .map(|m| {
-                m.panes
-                    .values()
-                    .flatten()
-                    .filter(|p| !p.is_plugin)
-                    .map(|p| p.id)
-                    .collect::<HashSet<u32>>()
             })
             .unwrap_or_default()
     }
@@ -700,6 +690,8 @@ impl State {
                 "focused_jelly_fast_hide id={} tab={}",
                 focused_jelly.id, tab_index
             ));
+            self.sticky_jelly_pane_id = Some(focused_jelly.id);
+            self.sticky_reveal_attempts = 0;
             hide_pane_with_id(PaneId::Terminal(focused_jelly.id));
             self.complete_cycle();
             return;
@@ -721,40 +713,44 @@ impl State {
                 .or_else(|| jelly_panes.iter().position(|(_, pane)| pane.is_focused))
                 .unwrap_or(0);
             let (_, keep_pane) = jelly_panes.remove(keep_idx);
+            self.sticky_jelly_pane_id = Some(keep_pane.id);
+            self.sticky_reveal_attempts = 0;
             for (_, extra_pane) in jelly_panes {
                 self.push_trace(format!("closing_extra_jelly_pane id={}", extra_pane.id));
                 close_terminal_pane(extra_pane.id);
             }
 
             let pane_id = PaneId::Terminal(keep_pane.id);
-            let pane_in_current_tab = self.find_jelly_in_tab(current_tab);
-
-            if let Some(pane) = pane_in_current_tab {
-                // Deterministic toggle behavior:
-                // if it's visible in this tab, hide it; otherwise show it.
-                let visible_in_current_tab = pane.is_focused || !pane.is_suppressed;
-                let target_pane_id = PaneId::Terminal(pane.id);
-                if visible_in_current_tab {
-                    self.push_trace(format!("hiding_jelly_pane id={}", pane.id));
-                    hide_pane_with_id(target_pane_id);
-                } else {
-                    self.push_trace(format!("showing_jelly_pane id={}", pane.id));
-                    show_pane_with_id(target_pane_id, true, true);
-                }
-                self.complete_cycle();
-            } else {
-                // Host the assistant in the currently focused tab so it's always one keypress away.
+            if keep_pane.is_suppressed {
+                // Keep toggles responsive: request move + show immediately, no update-loop waiting.
                 self.push_trace(format!(
-                    "relocating_jelly_pane id={} to_tab={}",
+                    "showing_jelly_pane id={} move_to_tab={}",
                     keep_pane.id, current_tab
                 ));
                 break_panes_to_tab_with_index(&[pane_id], current_tab, false);
-                self.relocating_pane_id = Some(keep_pane.id);
-                self.relocating_target_tab = Some(current_tab);
-                self.relocating_waiting_for_suppressed = false;
-                self.relocating_updates = 0;
+                show_pane_with_id(pane_id, true, true);
+            } else {
+                self.push_trace(format!("hiding_jelly_pane id={}", keep_pane.id));
+                hide_pane_with_id(pane_id);
             }
+            self.complete_cycle();
         } else {
+            if let Some(sticky_pane_id) = self.sticky_jelly_pane_id {
+                if self.sticky_reveal_attempts < 2 {
+                    self.sticky_reveal_attempts = self.sticky_reveal_attempts.saturating_add(1);
+                    self.push_trace(format!(
+                        "revealing_sticky_jelly_pane id={} attempt={}",
+                        sticky_pane_id, self.sticky_reveal_attempts
+                    ));
+                    show_pane_with_id(PaneId::Terminal(sticky_pane_id), true, true);
+                    self.complete_cycle();
+                    return;
+                }
+                self.push_trace(format!(
+                    "sticky_jelly_reveal_exhausted id={} attempts={}",
+                    sticky_pane_id, self.sticky_reveal_attempts
+                ));
+            }
             // Atomic host API: launch + optional stdin write in a single command.
             self.push_trace(format!(
                 "launching_new_jelly_terminal atomically command={}",
@@ -771,6 +767,8 @@ impl State {
             ) {
                 Ok(PaneId::Terminal(pane_id)) => {
                     self.push_trace(format!("launched_new_jelly_terminal pane_id={}", pane_id));
+                    self.sticky_jelly_pane_id = Some(pane_id);
+                    self.sticky_reveal_attempts = 0;
                     show_pane_with_id(PaneId::Terminal(pane_id), true, true);
                 }
                 Ok(pane_id) => {
