@@ -7,6 +7,7 @@ import {
 } from "./commands.js";
 import { startHeartbeat, stopHeartbeat, setBusy } from "./heartbeat.js";
 import { logTranscriptTurn } from "./logging.js";
+import { readState, writeState } from "./state.js";
 import {
   StreamWriter,
   Spinner,
@@ -23,16 +24,49 @@ const display = (text: string) => process.stdout.write(text);
 async function main(): Promise<void> {
   process.stdout.write("\x1b]0;Jelly J\x07");
 
+  const persistedState = await readState();
+  const currentZellijSession = process.env.ZELLIJ_SESSION_NAME?.trim() || undefined;
+
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
     prompt: "› ",
   });
 
-  let sessionId: string | undefined;
+  let sessionId: string | undefined = persistedState.sessionId;
+  let pendingSessionContextNote: string | undefined;
   let currentModel: ModelAlias = "opus";
   let uiState: UiState = "idle";
   let shuttingDown = false;
+
+  if (
+    persistedState.zellijSession &&
+    currentZellijSession &&
+    persistedState.zellijSession !== currentZellijSession
+  ) {
+    pendingSessionContextNote =
+      `You are now in zellij session "${currentZellijSession}" (previously "${persistedState.zellijSession}"). ` +
+      "Tab and pane state may have changed.";
+  }
+
+  async function persistState(): Promise<void> {
+    await writeState({
+      sessionId,
+      zellijSession: currentZellijSession,
+    });
+  }
+
+  async function shutdown(exitCode: number): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    stopHeartbeat();
+    try {
+      await persistState();
+    } catch {
+      // best effort only
+    }
+    process.exit(exitCode);
+  }
 
   display(renderWelcome(currentModel));
 
@@ -80,38 +114,46 @@ async function main(): Promise<void> {
     const writer = new StreamWriter(display);
 
     try {
-      const result = await chat(input, sessionId, modelIdForAlias(currentModel), {
-        onText: (text) => {
-          if (spinner.isRunning()) spinner.stop();
-          uiState = "thinking";
-          assistantText += text;
-          writer.write(text);
-        },
-        onToolUse: ({ name }) => {
-          if (spinner.isRunning()) spinner.stop();
-          writer.flushLine();
-          uiState = "tool";
-          printToolUse(name, display);
-        },
-        onResultError: (subtype, errors) => {
-          if (spinner.isRunning()) spinner.stop();
-          hadError = true;
-          const formatted = `[${subtype}] ${errors.join("; ")}`;
-          resultErrors.push(formatted);
-          writer.flushLine();
-          uiState = "error";
-          printError(formatted, display);
-        },
-        onPermissionRequest: (toolName, reason) => {
-          if (spinner.isRunning()) spinner.stop();
-          writer.flushLine();
-          uiState = "thinking";
-          printNote(`permission required: ${toolName} (${reason})`, display);
-        },
-      });
+      const result = await chat(
+        input,
+        sessionId,
+        modelIdForAlias(currentModel),
+        pendingSessionContextNote,
+        {
+          onText: (text) => {
+            if (spinner.isRunning()) spinner.stop();
+            uiState = "thinking";
+            assistantText += text;
+            writer.write(text);
+          },
+          onToolUse: ({ name }) => {
+            if (spinner.isRunning()) spinner.stop();
+            writer.flushLine();
+            uiState = "tool";
+            printToolUse(name, display);
+          },
+          onResultError: (subtype, errors) => {
+            if (spinner.isRunning()) spinner.stop();
+            hadError = true;
+            const formatted = `[${subtype}] ${errors.join("; ")}`;
+            resultErrors.push(formatted);
+            writer.flushLine();
+            uiState = "error";
+            printError(formatted, display);
+          },
+          onPermissionRequest: (toolName, reason) => {
+            if (spinner.isRunning()) spinner.stop();
+            writer.flushLine();
+            uiState = "thinking";
+            printNote(`permission required: ${toolName} (${reason})`, display);
+          },
+        }
+      );
 
       writer.flushLine();
       sessionId = result.sessionId;
+      pendingSessionContextNote = undefined;
+      await persistState();
 
       if (!hadError) {
         uiState = "idle";
@@ -141,10 +183,15 @@ async function main(): Promise<void> {
   });
 
   rl.on("close", () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    stopHeartbeat();
-    process.exit(0);
+    void shutdown(0);
+  });
+
+  process.on("SIGINT", () => {
+    rl.close();
+  });
+
+  process.on("SIGTERM", () => {
+    rl.close();
   });
 }
 

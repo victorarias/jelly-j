@@ -30,63 +30,54 @@ to suggest improvements (like a tidy roommate, not an annoying one).
 ### Prerequisites
 
 - [Zellij](https://zellij.dev) (v0.40+)
-- [Node.js](https://nodejs.org) (v18+)
+- [Bun](https://bun.sh) (v1.3+)
+- [Rust](https://www.rust-lang.org/tools/install) (for building the Zellij plugin)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (authenticated — Jelly J uses the Agent SDK which requires a valid Claude Code session)
 
 ### Install & run
 
 ```bash
-# Try it (downloads, runs, cleans up)
-npx jelly-j
-
 # Install globally
 npm install -g jelly-j
 jelly-j
 
 # Or clone for development
 git clone https://github.com/victorarias/jelly-j
-cd jelly-j && npm install && npm start
+cd jelly-j && npm install && bun src/index.ts
 ```
 
-### Zellij keybinding (optional)
+### Build and install plugin
 
-Add to your `~/.config/zellij/config.kdl` to launch Jelly J with `Alt+j`:
+```bash
+cd plugin
+cargo build --release --target wasm32-wasip1
+cp target/wasm32-wasip1/release/jelly-j.wasm ~/.config/zellij/plugins/
+```
+
+### Zellij keybinding (required for Alt+j)
+
+Add to your `~/.config/zellij/config.kdl`:
 
 ```kdl
 keybinds {
     shared {
         bind "Alt j" {
-            Run "npx" "jelly-j" {
-                direction "Down"
-                close_on_exit true
-            }
-        }
-    }
-}
-```
-
-Or as a floating pane:
-
-```kdl
-keybinds {
-    shared {
-        bind "Alt j" {
-            ToggleFloatingPanes
-            Run "npx" "jelly-j" {
+            MessagePlugin "file:~/.config/zellij/plugins/jelly-j.wasm" {
+                name "toggle"
                 floating true
-                close_on_exit true
-                name "Jelly J"
             }
         }
     }
 }
 ```
 
-### Fish shell function (optional)
+`MessagePlugin` sends `toggle` to the persistent butler plugin, launching it if needed.
+
+### Fish shell helper (optional)
 
 ```fish
-function jj --description "Launch Jelly J in a floating Zellij pane"
-    zellij action new-pane --floating --name "Jelly J" --close-on-exit -- npx jelly-j
+function jj --description "Toggle Jelly J via plugin pipe"
+    zellij pipe --plugin file:$HOME/.config/zellij/plugins/jelly-j.wasm --name toggle -- toggle
 end
 ```
 
@@ -132,9 +123,10 @@ end
 
 - **REPL**: readline prompt in a floating Zellij pane
 - **Agent**: Claude Opus 4.6 via the [Agent SDK](https://docs.anthropic.com/en/docs/claude-code/agent-sdk)
+- **Butler plugin**: persistent Zellij WASM plugin handling `Alt+j` toggle and pipe IPC
 - **Tools**: Zellij MCP tools + Claude Code built-in agentic tools (Read/Edit/Write/Grep/Glob/Bash/Task)
 - **Permission policy**: Bash always prompts; writes outside detected Zellij config roots always prompt
-- **Heartbeat**: Haiku 4.5 checks workspace state every 5 minutes, shows popup suggestions
+- **Heartbeat**: Haiku 4.5 checks butler state every 5 minutes, shows popup suggestions
 
 ## Tools
 
@@ -145,6 +137,7 @@ end
 | `get_layout` | Dump the full layout as KDL — tabs, panes, IDs, commands, positions |
 | `list_tabs` | List all tab names in the session |
 | `list_clients` | List connected clients, focused panes, running commands |
+| `get_butler_state` | Get cached tabs/panes directly from the butler plugin |
 
 ### Tab management
 
@@ -153,7 +146,7 @@ end
 | `go_to_tab` | Switch by index or name, optionally create if missing |
 | `new_tab` | Create a tab with optional name, cwd, layout |
 | `close_tab` | Close the focused tab |
-| `rename_tab` | Rename the focused tab |
+| `rename_tab` | Rename focused tab, or rename by 0-based position through butler IPC |
 
 ### Pane management
 
@@ -161,7 +154,9 @@ end
 |------|-------------|
 | `new_pane` | Open tiled, floating, or stacked pane with optional command |
 | `close_pane` | Close the focused pane |
-| `rename_pane` | Rename the focused pane |
+| `rename_pane` | Rename focused pane, or rename by pane ID through butler IPC |
+| `hide_pane_by_id` | Hide/suppress pane by ID through butler IPC |
+| `show_pane_by_id` | Show/unsuppress pane by ID through butler IPC |
 | `move_focus` | Move focus in a direction |
 | `move_pane` | Move the focused pane |
 | `resize_pane` | Resize the focused pane |
@@ -211,7 +206,7 @@ git clone https://github.com/victorarias/jelly-j
 cd jelly-j
 npm install
 
-# Run from source (uses tsx)
+# Run from source
 npm start
 
 # Type-check
@@ -221,7 +216,11 @@ npm run typecheck
 npm run build
 
 # Run the built version
-node dist/index.js
+bun dist/index.js
+
+# Build the plugin
+cd plugin
+cargo build --release --target wasm32-wasip1
 ```
 
 ## License

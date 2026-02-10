@@ -14,10 +14,10 @@ The target state is a single persistent butler experience:
 1. Single experience only: the old ephemeral launcher behavior is removed.
 2. Naming stays `jelly-j` everywhere (plugin artifact, crate/package naming, docs).
 3. Conversation memory is intentionally global (`~/.jelly-j/state.json`) and shared across sessions/clients.
-4. Plugin API implementation target is `zellij-tile = 0.43.1`.
+4. Plugin API implementation target is local Zellij `main` (path dependency).
+   - On `main`, `show_pane_with_id` takes 3 args.
    - On `0.43.1`, `show_pane_with_id` takes 2 args.
-   - On Zellij `main`, `show_pane_with_id` takes 3 args.
-   - This plan implements 0.43.1 semantics first, then adapts if/when dependency is upgraded.
+   - If we downgrade/retarget, all `show_pane_with_id` call sites must be updated in the same change.
 
 ## Three Workstreams
 
@@ -47,14 +47,17 @@ Butler:  load → permission → idle (caching PaneUpdate + TabUpdate)
 
 The toggle sub-state-machine (awaiting_pane, relocating) stays identical. The only structural change is removing `done`/`close_self()` and adding `pipe()`.
 
-**Focused tab detection**: Currently relies on finding a focused plugin pane (the launcher itself). Won't work for a background plugin. Replace with `TabUpdate` subscription — `TabInfo` has `active: bool` field:
+**Focused tab detection**: Currently relies on finding a focused plugin pane (the launcher itself). Won't work for a background plugin. Prefer `TabUpdate` (`TabInfo.active`) and keep pane-focus fallback when `TabUpdate` is absent in headless/background runs:
 ```rust
 fn active_tab_index(&self) -> Option<usize> {
-    self.tabs.as_ref()?.iter().find(|t| t.active).map(|t| t.position)
+    self.tabs
+        .as_ref()
+        .and_then(|tabs| tabs.iter().find(|t| t.active).map(|t| t.position))
+        .or_else(|| /* pane focus fallback */)
 }
 ```
 
-**Pipe readiness**: on cold start, a pipe can arrive before caches are primed by events. For `request` messages, return a retryable "not ready" response until the first relevant cache (`PaneUpdate` and `TabUpdate`) is available.
+**Pipe readiness**: on cold start, a pipe can arrive before caches are primed by events. For `request` messages, return a retryable "not ready" response until `PaneUpdate` cache is available. Do not hard-require `TabUpdate` for toggle execution.
 
 **IPC protocol**: Node.js sends JSON via `zellij pipe --plugin <url> --name request -- '{"op":"rename_tab",...}'`. Butler parses, executes using native plugin API, responds via `cli_pipe_output()`. The `zellij pipe` CLI blocks until response, giving synchronous semantics from the REPL side.
 
@@ -64,7 +67,7 @@ Operations available through pipe:
 | `rename_tab` | `rename_tab(position, name)` | no focus switch |
 | `rename_pane` | `rename_pane_with_id(pane_id, name)` | no focus switch |
 | `hide_pane` | `hide_pane_with_id(pane_id)` | |
-| `show_pane` | `show_pane_with_id(pane_id, should_float_if_hidden)` | 0.43.1 signature |
+| `show_pane` | `show_pane_with_id(pane_id, should_float_if_hidden, should_focus_pane)` | main signature |
 | `get_state` | return cached tabs + pane summary | single call, no polling |
 | `ping` | return ok | health check |
 

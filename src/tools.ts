@@ -4,6 +4,15 @@ import path from "node:path";
 import { z } from "zod";
 import { zellijAction } from "./zellij.js";
 import {
+  clearButlerTrace,
+  getButlerState,
+  getButlerTrace,
+  hidePaneById,
+  renamePaneById,
+  renameTabByPosition,
+  showPaneById,
+} from "./zellijPipe.js";
+import {
   getInstalledZellijVersion,
   getZellijConfigInfo,
   getZellijConfigRoots,
@@ -43,6 +52,48 @@ const listClients = tool(
   async () => {
     const { stdout } = await zellijAction("list-clients");
     return { content: [{ type: "text", text: stdout }] };
+  }
+);
+
+const getButlerStateTool = tool(
+  "get_butler_state",
+  "Return the Jelly J butler cached workspace state (tabs and panes) via plugin pipe IPC.",
+  {},
+  async () => {
+    const state = await getButlerState();
+    return {
+      content: [{ type: "text", text: JSON.stringify(state, null, 2) }],
+    };
+  }
+);
+
+const getButlerTraceTool = tool(
+  "get_butler_trace",
+  "Return recent Jelly J butler trace entries (state transitions and plugin actions).",
+  {
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Maximum number of trace entries to return"),
+  },
+  async (args) => {
+    const entries = await getButlerTrace(args.limit);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ entries }, null, 2) }],
+    };
+  }
+);
+
+const clearButlerTraceTool = tool(
+  "clear_butler_trace",
+  "Clear the in-memory Jelly J butler trace buffer.",
+  {},
+  async () => {
+    await clearButlerTrace();
+    return { content: [{ type: "text", text: "Butler trace cleared" }] };
   }
 );
 
@@ -136,11 +187,29 @@ const closeTab = tool(
 
 const renameTab = tool(
   "rename_tab",
-  "Rename the currently focused tab.",
+  "Rename a tab. If position is provided (0-based), uses butler IPC without changing focus. Otherwise renames the currently focused tab.",
   {
     name: z.string().describe("New tab name"),
+    position: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("0-based tab position (from get_butler_state)"),
   },
   async (args) => {
+    if (typeof args.position === "number") {
+      await renameTabByPosition(args.position, args.name);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Tab at position ${args.position} renamed to "${args.name}"`,
+          },
+        ],
+      };
+    }
+
     await zellijAction("rename-tab", args.name);
     return {
       content: [{ type: "text", text: `Tab renamed to "${args.name}"` }],
@@ -219,14 +288,72 @@ const closePane = tool(
 
 const renamePane = tool(
   "rename_pane",
-  "Rename the currently focused pane.",
+  "Rename a pane. If pane_id is provided, uses butler IPC without changing focus. Otherwise renames the currently focused pane.",
   {
     name: z.string().describe("New pane name"),
+    pane_id: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe("Terminal pane ID (from get_layout/get_butler_state)"),
   },
   async (args) => {
+    if (typeof args.pane_id === "number") {
+      await renamePaneById(args.pane_id, args.name);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Pane ${args.pane_id} renamed to "${args.name}"`,
+          },
+        ],
+      };
+    }
+
     await zellijAction("rename-pane", args.name);
     return {
       content: [{ type: "text", text: `Pane renamed to "${args.name}"` }],
+    };
+  }
+);
+
+const hidePaneByIdTool = tool(
+  "hide_pane_by_id",
+  "Hide (suppress) a pane by ID through butler IPC without changing focus.",
+  {
+    pane_id: z.number().int().min(1).describe("Terminal pane ID"),
+  },
+  async (args) => {
+    await hidePaneById(args.pane_id);
+    return {
+      content: [{ type: "text", text: `Pane ${args.pane_id} hidden` }],
+    };
+  }
+);
+
+const showPaneByIdTool = tool(
+  "show_pane_by_id",
+  "Show (unsuppress) a pane by ID through butler IPC.",
+  {
+    pane_id: z.number().int().min(1).describe("Terminal pane ID"),
+    should_float_if_hidden: z
+      .boolean()
+      .optional()
+      .describe("If true, restore as floating when hidden"),
+    should_focus_pane: z
+      .boolean()
+      .optional()
+      .describe("If true, focus pane when showing"),
+  },
+  async (args) => {
+    await showPaneById(
+      args.pane_id,
+      args.should_float_if_hidden ?? true,
+      args.should_focus_pane ?? true
+    );
+    return {
+      content: [{ type: "text", text: `Pane ${args.pane_id} shown` }],
     };
   }
 );
@@ -800,6 +927,9 @@ export const zellijMcpServer = createSdkMcpServer({
     getLayout,
     listTabs,
     listClients,
+    getButlerStateTool,
+    getButlerTraceTool,
+    clearButlerTraceTool,
     // Tab management
     goToTab,
     newTab,
@@ -809,6 +939,8 @@ export const zellijMcpServer = createSdkMcpServer({
     newPane,
     closePane,
     renamePane,
+    hidePaneByIdTool,
+    showPaneByIdTool,
     moveFocus,
     movePane,
     resizePane,

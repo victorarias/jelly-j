@@ -1,6 +1,7 @@
-import { zellijAction } from "./zellij.js";
 import { heartbeatQuery } from "./agent.js";
 import { logHeartbeatError, logHeartbeatInfo } from "./logging.js";
+import { getButlerState, ZellijPipeError } from "./zellijPipe.js";
+import { zellijAction } from "./zellij.js";
 
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const INITIAL_DELAY_MS = 2 * 60 * 1000; // 2 minutes
@@ -18,12 +19,16 @@ async function check(): Promise<void> {
   logHeartbeatInfo("tick start");
 
   try {
-    const [layout, tabs] = await Promise.all([
-      zellijAction("dump-layout"),
-      zellijAction("query-tab-names"),
-    ]);
+    const state = await getButlerState();
+    const tabs = state.tabs
+      .slice()
+      .sort((a, b) => a.position - b.position)
+      .map((tab) => `${tab.position}:${tab.name}${tab.active ? " (active)" : ""}`)
+      .join(", ");
 
-    const suggestion = await heartbeatQuery(layout.stdout, tabs.stdout);
+    const layout = JSON.stringify(state, null, 2);
+
+    const suggestion = await heartbeatQuery(layout, tabs);
     logHeartbeatInfo(`tick result: ${suggestion || "(empty)"}`);
 
     if (suggestion && suggestion !== "NOTHING" && !busy) {
@@ -31,6 +36,10 @@ async function check(): Promise<void> {
       logHeartbeatInfo("popup shown");
     }
   } catch (err) {
+    if (err instanceof ZellijPipeError && err.code === "not_ready") {
+      logHeartbeatInfo("tick skipped: butler not ready");
+      return;
+    }
     // Silently skip in UI — Zellij might not be available or we're in a weird state.
     const message = err instanceof Error ? err.message : String(err);
     logHeartbeatError(`tick failed: ${message}`);
@@ -38,7 +47,7 @@ async function check(): Promise<void> {
 }
 
 async function showPopup(message: string): Promise<void> {
-  // Use node -e with JSON.stringify to avoid shell injection.
+  // Use bun -e with JSON.stringify to avoid shell injection.
   // zellij passes args directly to the process (no shell), and
   // JSON.stringify safely encodes any LLM output.
   const script = [
@@ -65,7 +74,7 @@ async function showPopup(message: string): Promise<void> {
     "--y",
     "2",
     "--",
-    "node",
+    "bun",
     "-e",
     script
   );

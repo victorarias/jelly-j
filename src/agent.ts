@@ -36,7 +36,7 @@ Output format:
 
 How you work:
 1. For LIVE session changes, ALWAYS start by checking current workspace state
-   (get_layout and list_tabs) before acting
+   (prefer get_butler_state; use get_layout/list_tabs when needed) before acting
 2. For CONFIG file changes, inspect config files first, then patch surgically
 3. Explain briefly what you're about to do, then do it
 4. After changes, verify the result
@@ -56,7 +56,14 @@ For complex reorganizations (like "sort everything by project"), work
 step by step: understand the current state, make a plan, execute it,
 then confirm the result.`;
 
-function buildSystemPrompt(configInfo: ZellijConfigInfo): string {
+function buildSystemPrompt(
+  configInfo: ZellijConfigInfo,
+  sessionContextNote?: string
+): string {
+  const sessionContext = sessionContextNote
+    ? `\n\nRuntime session context:\n- ${sessionContextNote}`
+    : "";
+
   return `${BASE_SYSTEM_PROMPT}
 
 Local zellij config context:
@@ -70,7 +77,7 @@ If asked to change config, use config-aware tools first (get_zellij_config_info,
 
 Permission policy in this session:
 - Bash commands require explicit user approval
-- File modifications outside Zellij config roots require explicit user approval`;
+- File modifications outside Zellij config roots require explicit user approval${sessionContext}`;
 }
 
 export type ChatModel = "claude-opus-4-6" | "claude-haiku-4-5-20251001";
@@ -332,6 +339,7 @@ export async function chat(
   userMessage: string,
   sessionId: string | undefined,
   model: ChatModel,
+  sessionContextNote: string | undefined,
   events: ChatEvents = {}
 ): Promise<{ sessionId?: string }> {
   let newSessionId: string | undefined;
@@ -353,7 +361,7 @@ export async function chat(
   }
 
   const options: Options = {
-    systemPrompt: buildSystemPrompt(zellijConfigInfo),
+    systemPrompt: buildSystemPrompt(zellijConfigInfo, sessionContextNote),
     model,
     tools: { type: "preset", preset: "claude_code" },
     mcpServers: { zellij: zellijMcpServer },
@@ -453,4 +461,3 @@ If nothing worth suggesting, respond with exactly: NOTHING`;
 
   return result.trim();
 }
-

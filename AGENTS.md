@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run Commands
 
 ```bash
-# Development (uses tsx for live TypeScript execution)
+# Development (Bun runtime)
 npm start
 
 # Type-check
@@ -15,66 +15,127 @@ npm run typecheck
 npm run build
 
 # Run the built version
-node dist/index.js
+bun dist/index.js
 
-# Build the Zellij launcher plugin (requires wasm32-wasip1 target)
+# Build the Zellij butler plugin (requires wasm32-wasip1 target)
 cd plugin && cargo build --release --target wasm32-wasip1
 
 # Copy plugin to Zellij plugins directory
-cp plugin/target/wasm32-wasip1/release/jelly-j-launcher.wasm ~/.config/zellij/plugins/
+cp plugin/target/wasm32-wasip1/release/jelly-j.wasm ~/.config/zellij/plugins/
 ```
 
 ## Architecture
 
-Two components: a **Node.js REPL** (the assistant) and a **Rust WASM plugin** (the launcher).
+Two components: a **Bun REPL** (the assistant) and a **Rust WASM plugin** (the persistent butler).
 
 ## Mandatory Reference For Plugin Work
 
-Before changing any launcher/plugin/keybind behavior, read:
+Before changing any plugin/keybind behavior, read:
 - @docs/zellij-plugin-scripting-guide.md
 
 Maintenance rule:
 - If you find any statement in that guide is wrong, update it as part of your change.
-- Treat `v0.43.1` behavior as canonical unless we intentionally upgrade Zellij; if you inspect `main`, call out version drift explicitly in the guide.
+- Treat the currently pinned dependency target as canonical. Right now this repo targets local Zellij `main` via path dependency; if that changes, update the guide in the same change.
 
-### Node.js REPL (`src/`)
+### Bun REPL (`src/`)
 
 ```
-index.ts  →  Readline REPL loop, sets terminal title to "Jelly J" (used by launcher to find the pane)
-agent.ts  →  Claude Agent SDK integration: chat() for conversations, heartbeatQuery() for background checks
-tools.ts  →  20 MCP tools wrapping zellij action subcommands, exported as a single SDK MCP server
-zellij.ts →  Thin wrapper: execFile("zellij", ["action", ...args]) with 10s timeout
-heartbeat.ts → Every 5min, dumps workspace state, asks Haiku if anything needs tidying, shows popup
+index.ts      → Readline REPL loop, terminal title, global session resume/save
+agent.ts      → Claude Agent SDK integration: chat() + heartbeatQuery()
+tools.ts      → MCP tools (zellij actions + butler IPC helpers)
+zellij.ts     → Thin wrapper: execFile("zellij", ["action", ...args]) with timeout
+zellijPipe.ts → Thin wrapper: execFile("zellij", ["pipe", ...args]) for butler RPC
+state.ts      → Read/write ~/.jelly-j/state.json for global session continuity
+heartbeat.ts  → Every 5min, asks butler for cached state, asks Haiku if tidying is needed
 ```
 
-**Data flow**: User types in REPL → `chat()` sends to Claude Opus 4.6 via Agent SDK → Claude calls MCP tools → tools run `zellij action` subcommands → results stream back to REPL.
+Data flow:
+- User types in REPL
+- `chat()` sends to Claude Opus via Agent SDK
+- Claude calls MCP tools
+- Tools use either `zellij action` (direct) or butler pipe RPC (`zellij pipe`)
+- Results stream back to REPL
 
-The Agent SDK spawns a Claude Code subprocess per `query()` call. Session continuity is maintained via `resume` with a session ID. MCP servers require the async generator input form.
+Agent SDK details:
+- Each `query()` call spawns a Claude Code subprocess.
+- Session continuity is maintained via `resume` + persisted `sessionId`.
+- SDK MCP servers require async-generator input mode.
 
-The heartbeat uses a separate Haiku model for cost efficiency (~$0.10/day). It skips checks while the user is actively chatting (`setBusy` flag).
+Heartbeat:
+- Uses Haiku for cost efficiency.
+- Skips checks while the user is actively chatting (`setBusy`).
+- Reads workspace state from butler cache (`get_state`) instead of polling raw action commands.
 
-### Zellij Launcher Plugin (`plugin/`)
+### Zellij Butler Plugin (`plugin/`)
 
-A WASM plugin using `zellij-tile` 0.43.1 that provides launch-or-focus behavior for `Alt+j`:
+A WASM plugin using `zellij-tile` (local `main`) that provides persistent `Alt+j` behavior and IPC:
 
-- **First press**: Opens a floating terminal, writes `jelly-j\n` to it via `write_chars_to_pane_id`
-- **Subsequent presses**: Finds the existing pane by title ("Jelly J") or command name, focuses it
-- **Immediately hides itself** via `hide_self()` in `render()` — the plugin pane should never be visible
+- Lives for the whole session (does not close itself per keypress)
+- Handles `toggle` pipe messages for show/hide/relocate behavior
+- Handles `request` pipe messages for control ops (`ping`, `get_state`, rename/show/hide)
+- Hides its own pane in `render()` so no plugin pane is visible
 
-Uses a two-phase approach because `open_terminal_floating` is async:
-1. Phase 1 (`launch_or_focus`): Opens the floating terminal, sets `awaiting_pane = true`
-2. Phase 2 (`write_command_to_new_pane`): On next `PaneUpdate`, finds the new floating terminal by filtering for floating + non-plugin + not-yet-named panes, writes the command to it by pane ID
+State machine:
+1. Load: request permissions + subscribe (`PaneUpdate`, `TabUpdate`, `PermissionRequestResult`)
+2. Idle: cache pane/tab state continuously
+3. Pipe `toggle`: run toggle cycle
+4. Pipe `request`: parse JSON request, execute API call, respond via `cli_pipe_output`
 
-State machine flags: `ready` (permissions granted), `done` (action completed this cycle), `awaiting_pane` (waiting for phase 2).
+Key flags:
+- `ready` (permissions granted)
+- `pending_toggle` (coalesced toggle requests)
+- `awaiting_pane` (waiting for newly opened terminal to appear)
+- relocation fields (`relocating_*`) for cross-tab floating restore sequence
 
 ## Key Design Decisions
 
-- **`write_chars_to_pane_id` instead of `write_chars`**: The unfocused `write_chars` would target the wrong pane (the tiled shell instead of the new floating terminal). Writing by pane ID is reliable.
-- **Terminal title escape code** (`\x1b]0;Jelly J\x07` in index.ts): Sets the pane title so the launcher plugin can find it on subsequent presses. Also checked via `terminal_command` as fallback.
-- **No `open_command_pane_floating`**: Zellij command panes start suspended (user must press Enter). Using `open_terminal_floating` + `write_chars_to_pane_id` avoids this.
-- **Agent SDK `permissionMode: "bypassPermissions"`**: Tools only run `zellij action` subcommands — no file access, no shell commands.
-- **Plain text output**: The system prompt explicitly forbids markdown since the REPL runs in a raw terminal.
+- Persistent butler over ephemeral launcher: single long-lived plugin instance.
+- `MessagePlugin` keybind over `LaunchOrFocusPlugin`.
+- `write_chars_to_pane_id` for deterministic command injection into the new pane.
+- Pipe IPC (`zellij pipe`) for no-focus-switch tab/pane operations.
+- Global conversation continuity in `~/.jelly-j/state.json` (intentional, shared across zellij sessions).
+- Bun runtime and bundling (`bun build ... --target bun`).
+- Plain text output: system prompt forbids markdown because REPL is raw terminal.
+
+## Agent Guardrails (Main Branch Reality)
+
+These are implementation constraints agents should treat as hard-won invariants unless they intentionally redesign and re-validate.
+
+1. Subscription ordering is not optional.
+   - In plugin `load()`, call `subscribe(...)` before `request_permission(...)`.
+   - If permission is requested first, `PermissionRequestResult` can be missed in fast/cached flows.
+
+2. Do not gate toggle logic on `TabUpdate`.
+   - On local Zellij `main`, headless/background runs may emit `PaneUpdate` without `TabUpdate`.
+   - Toggle and `get_state` readiness should require pane cache readiness; tab cache is best-effort.
+
+3. Assume permission result events can be absent when permissions are cached.
+   - If pane cache is live and no explicit denial occurred, infer readiness.
+   - Keep denial handling explicit if `PermissionRequestResult::Denied` arrives.
+
+4. Deduplicate CLI `toggle` pipes by pipe ID.
+   - `zellij pipe --name toggle` may deliver duplicate events for the same CLI request.
+   - Store last CLI pipe id and no-op duplicates to avoid double-toggle flicker.
+
+5. Prefer floating terminal + targeted stdin write over floating command pane for launch.
+   - Reliable path here: `open_terminal_floating(...)` then `write_chars_to_pane_id(...)`.
+   - The attempted `open_command_pane_floating(...)` path was not reliable for this workflow in current environment.
+
+6. Update-count timeouts must tolerate high event rates.
+   - `PaneUpdate` frequency on `main` can be very high.
+   - Small update-count thresholds cause false timeout before pane binding.
+
+7. Harness runs must seed plugin permission cache for URL variants.
+   - Cache file: macOS `~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl`
+   - Seed both path and URL forms (`/path`, `file:/path`, `file:///path`, etc.) to avoid prompt-driven nondeterminism.
+
+8. Always test against the deployed wasm artifact, not just local build output.
+   - After plugin build, copy `plugin/target/wasm32-wasip1/release/jelly-j.wasm` to `~/.config/zellij/plugins/jelly-j.wasm` before harness/e2e.
+
+9. Use butler trace/state as first-line diagnostics.
+   - Capture `get_trace` and `get_state` before cleanup in failing harness runs.
+   - Prefer trace evidence over assumptions about zellij event ordering.
 
 ## npm Distribution
 
-Published as `jelly-j` on npm. `tsup` builds a single ESM file with `#!/usr/bin/env node` shebang. Only `dist/` is included in the package (`files` field).
+Published as `jelly-j` on npm. Build output is ESM with `#!/usr/bin/env bun` shebang and `dist/` is the published payload.
