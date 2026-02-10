@@ -540,6 +540,22 @@ impl State {
             .cloned()
     }
 
+    fn focused_visible_jelly_pane(&self) -> Option<(usize, PaneInfo)> {
+        self.panes
+            .as_ref()?
+            .panes
+            .iter()
+            .find_map(|(tab_index, panes)| {
+                panes
+                    .iter()
+                    .find(|pane| {
+                        self.is_jelly_pane(pane) && pane.is_focused && !pane.is_suppressed
+                    })
+                    .cloned()
+                    .map(|pane| (*tab_index, pane))
+            })
+    }
+
     fn all_jelly_panes(&self) -> Vec<(usize, PaneInfo)> {
         self.panes
             .as_ref()
@@ -679,6 +695,16 @@ impl State {
     }
 
     fn launch_or_toggle(&mut self) {
+        if let Some((tab_index, focused_jelly)) = self.focused_visible_jelly_pane() {
+            self.push_trace(format!(
+                "focused_jelly_fast_hide id={} tab={}",
+                focused_jelly.id, tab_index
+            ));
+            hide_pane_with_id(PaneId::Terminal(focused_jelly.id));
+            self.complete_cycle();
+            return;
+        }
+
         let current_tab = self.active_tab_index().unwrap_or(0);
         self.push_trace(format!("launch_or_toggle current_tab={}", current_tab));
 
