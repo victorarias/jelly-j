@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::time::{SystemTime, UNIX_EPOCH};
 use zellij_tile::prelude::*;
 
 const PANE_NAME: &str = "Jelly J";
 const COMMAND: &str = "jelly-j";
 const TRACE_LIMIT: usize = 200;
+const TOGGLE_DEDUP_WINDOW_MS: u128 = 250;
 
 #[derive(Default)]
 struct State {
@@ -32,6 +34,7 @@ struct State {
     last_cli_toggle_pipe_id: Option<String>,
     trace_seq: u64,
     trace: VecDeque<String>,
+    last_toggle_epoch_ms: Option<u128>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,6 +195,18 @@ impl ZellijPlugin for State {
         match pipe_message.name.as_str() {
             "toggle" => {
                 let source = pipe_message.source;
+                let now_epoch_ms = Self::now_epoch_millis();
+                if self.toggle_within_dedup_window(now_epoch_ms) {
+                    self.push_trace(format!(
+                        "pipe toggle dedup_window_ignored source={:?}",
+                        source
+                    ));
+                    Self::respond_to_cli(
+                        &source,
+                        Some(Self::ok_response(json!({ "ok": true, "dedup_window": true }))),
+                    );
+                    return false;
+                }
                 if let PipeSource::Cli(pipe_id) = &source {
                     if self.last_cli_toggle_pipe_id.as_deref() == Some(pipe_id.as_str()) {
                         self.push_trace(format!(
@@ -228,6 +243,23 @@ impl ZellijPlugin for State {
 }
 
 impl State {
+    fn now_epoch_millis() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0)
+    }
+
+    fn toggle_within_dedup_window(&mut self, now_epoch_ms: u128) -> bool {
+        if let Some(last_epoch_ms) = self.last_toggle_epoch_ms {
+            if now_epoch_ms.saturating_sub(last_epoch_ms) <= TOGGLE_DEDUP_WINDOW_MS {
+                return true;
+            }
+        }
+        self.last_toggle_epoch_ms = Some(now_epoch_ms);
+        false
+    }
+
     fn infer_cached_permission_grant(&mut self) {
         if self.ready
             || self.permission_result_seen
@@ -473,33 +505,29 @@ impl State {
     }
 
     fn active_tab_index(&self) -> Option<usize> {
+        let manifest = self.panes.as_ref()?;
+        if let Some((tab_index, _)) = manifest.panes.iter().find(|(_, panes)| {
+            panes
+                .iter()
+                .any(|pane| pane.is_focused && !pane.exited && !pane.is_plugin && !self.is_jelly_pane(pane))
+        }) {
+            return Some(*tab_index);
+        }
+        if let Some((tab_index, _)) = manifest.panes.iter().find(|(_, panes)| {
+            panes
+                .iter()
+                .any(|pane| pane.is_focused && !pane.exited && !pane.is_plugin)
+        }) {
+            return Some(*tab_index);
+        }
+
         if let Some(tabs) = self.tabs.as_ref() {
             if let Some(tab) = tabs.iter().find(|tab| tab.active) {
                 return Some(tab.position);
             }
         }
 
-        let manifest = self.panes.as_ref()?;
-        manifest
-            .panes
-            .iter()
-            .find_map(|(tab_index, panes)| {
-                if panes.iter().any(|p| p.is_focused && !self.is_jelly_pane(p)) {
-                    Some(*tab_index)
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                manifest.panes.iter().find_map(|(tab_index, panes)| {
-                    if panes.iter().any(|p| p.is_focused) {
-                        Some(*tab_index)
-                    } else {
-                        None
-                    }
-                })
-            })
-            .or_else(|| manifest.panes.keys().min().copied())
+        manifest.panes.keys().min().copied()
     }
 
     fn find_jelly_in_tab(&self, tab_index: usize) -> Option<PaneInfo> {
@@ -678,12 +706,14 @@ impl State {
             if let Some(pane) = pane_in_current_tab {
                 // Deterministic toggle behavior:
                 // if it's visible in this tab, hide it; otherwise show it.
-                if !pane.is_suppressed {
-                    self.push_trace(format!("hiding_jelly_pane id={}", keep_pane.id));
-                    hide_pane_with_id(pane_id);
+                let visible_in_current_tab = pane.is_focused || !pane.is_suppressed;
+                let target_pane_id = PaneId::Terminal(pane.id);
+                if visible_in_current_tab {
+                    self.push_trace(format!("hiding_jelly_pane id={}", pane.id));
+                    hide_pane_with_id(target_pane_id);
                 } else {
-                    self.push_trace(format!("showing_jelly_pane id={}", keep_pane.id));
-                    show_pane_with_id(pane_id, true, true);
+                    self.push_trace(format!("showing_jelly_pane id={}", pane.id));
+                    show_pane_with_id(target_pane_id, true, true);
                 }
                 self.complete_cycle();
             } else {

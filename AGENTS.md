@@ -149,6 +149,10 @@ These are implementation constraints agents should treat as hard-won invariants 
    - For operational restart, use `npm run ops:restart` (timeout-bounded, lock-aware, no unbounded pipe wait).
    - In code, map pipe timeouts to explicit `ZellijPipeError` with `code="timeout"` and surface actionable errors.
 
+12. Keybind-delivered toggle pipes can be duplicated in tight succession.
+   - Keep a short dedup window in the plugin toggle handler to avoid hide-then-show on a single Alt+j press.
+   - Do not rely only on CLI pipe-id dedup; keybind sources have no pipe id.
+
 ## npm Distribution
 
 Published as `jelly-j` on npm. Build output is ESM with `#!/usr/bin/env bun` shebang and `dist/` is the published payload.
