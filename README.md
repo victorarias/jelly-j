@@ -73,6 +73,13 @@ keybinds {
 
 `MessagePlugin` sends `toggle` to the persistent butler plugin, launching it if needed.
 
+### Singleton semantics
+
+- Jelly J enforces a global process lock at `~/.jelly-j/agent.lock.json`.
+- Only one `jelly-j` process can run per computer at a time.
+- If a second instance starts, it exits immediately and tells you where the active one is.
+- `Ctrl-C` does not exit Jelly J. Use `exit` / `quit` to stop it.
+
 ### Fish shell helper (optional)
 
 ```fish

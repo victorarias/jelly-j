@@ -45,7 +45,7 @@ agent.ts      → Claude Agent SDK integration: chat() + heartbeatQuery()
 tools.ts      → MCP tools (zellij actions + butler IPC helpers)
 zellij.ts     → Thin wrapper: execFile("zellij", ["action", ...args]) with timeout
 zellijPipe.ts → Thin wrapper: execFile("zellij", ["pipe", ...args]) for butler RPC
-state.ts      → Read/write ~/.jelly-j/state.json for global session continuity
+state.ts      → Read/write ~/.jelly-j/state.json + enforce global process lock (~/.jelly-j/agent.lock.json)
 heartbeat.ts  → Every 5min, asks butler for cached state, asks Haiku if tidying is needed
 ```
 
@@ -89,11 +89,12 @@ Key flags:
 
 ## Key Design Decisions
 
-- Persistent butler over ephemeral launcher: single long-lived plugin instance.
-- `MessagePlugin` keybind over `LaunchOrFocusPlugin`.
+- Persistent butler: single long-lived plugin instance.
+- `MessagePlugin` keybind for `Alt+j` toggle delivery.
 - `write_chars_to_pane_id` for deterministic command injection into the new pane.
 - Pipe IPC (`zellij pipe`) for no-focus-switch tab/pane operations.
 - Global conversation continuity in `~/.jelly-j/state.json` (intentional, shared across zellij sessions).
+- Global singleton process lock in `~/.jelly-j/agent.lock.json` (one jelly-j process per computer).
 - Bun runtime and bundling (`bun build ... --target bun`).
 - Plain text output: system prompt forbids markdown because REPL is raw terminal.
 
@@ -135,6 +136,11 @@ These are implementation constraints agents should treat as hard-won invariants 
 9. Use butler trace/state as first-line diagnostics.
    - Capture `get_trace` and `get_state` before cleanup in failing harness runs.
    - Prefer trace evidence over assumptions about zellij event ordering.
+
+10. Preserve global singleton semantics in REPL process management.
+   - Startup must acquire the global lock before initializing interactive loop.
+   - Shutdown/fatal paths must release lock best-effort.
+   - `Ctrl-C` should not terminate Jelly J by default; explicit `exit`/`quit` controls termination.
 
 ## npm Distribution
 

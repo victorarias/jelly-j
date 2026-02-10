@@ -7,7 +7,12 @@ import {
 } from "./commands.js";
 import { startHeartbeat, stopHeartbeat, setBusy } from "./heartbeat.js";
 import { logTranscriptTurn } from "./logging.js";
-import { readState, writeState } from "./state.js";
+import {
+  acquireAgentLock,
+  readState,
+  releaseAgentLock,
+  writeState,
+} from "./state.js";
 import {
   StreamWriter,
   Spinner,
@@ -23,9 +28,23 @@ const display = (text: string) => process.stdout.write(text);
 
 async function main(): Promise<void> {
   process.stdout.write("\x1b]0;Jelly J\x07");
+  const currentZellijSession = process.env.ZELLIJ_SESSION_NAME?.trim() || undefined;
+
+  const lockStatus = await acquireAgentLock(currentZellijSession);
+  if (!lockStatus.acquired) {
+    const pidText = lockStatus.owner?.pid ? `pid ${lockStatus.owner.pid}` : "another process";
+    const sessionText = lockStatus.owner?.zellijSession
+      ? ` in zellij session "${lockStatus.owner.zellijSession}"`
+      : "";
+    printNote(
+      `Jelly J is already running (${pidText}${sessionText}). Global singleton mode allows only one process per computer.`,
+      display
+    );
+    printNote("Use the existing Jelly J pane, or stop that process first.", display);
+    return;
+  }
 
   const persistedState = await readState();
-  const currentZellijSession = process.env.ZELLIJ_SESSION_NAME?.trim() || undefined;
 
   const rl = createInterface({
     input: process.stdin,
@@ -62,6 +81,11 @@ async function main(): Promise<void> {
     stopHeartbeat();
     try {
       await persistState();
+    } catch {
+      // best effort only
+    }
+    try {
+      await releaseAgentLock();
     } catch {
       // best effort only
     }
@@ -187,7 +211,9 @@ async function main(): Promise<void> {
   });
 
   process.on("SIGINT", () => {
-    rl.close();
+    display("\n");
+    printNote('Ctrl-C does not exit Jelly J. Type "exit" to close it.', display);
+    rl.prompt();
   });
 
   process.on("SIGTERM", () => {
@@ -196,6 +222,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
+  void releaseAgentLock();
   console.error("Fatal:", err);
   process.exit(1);
 });
