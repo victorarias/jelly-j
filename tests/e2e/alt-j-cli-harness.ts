@@ -9,6 +9,10 @@ type CmdResult = {
   status: number;
 };
 
+type TimedCmdResult = CmdResult & {
+  durationMs: number;
+};
+
 type FloatingPaneStats = {
   totalFloatingPanes: number;
   nonPluginFloatingPanes: number;
@@ -66,6 +70,12 @@ function run(args: string[], allowFailure = false, timeoutMs = 10_000): CmdResul
     }
     return { stdout, stderr, status };
   }
+}
+
+function runTimed(args: string[], allowFailure = false, timeoutMs = 10_000): TimedCmdResult {
+  const start = Date.now();
+  const result = run(args, allowFailure, timeoutMs);
+  return { ...result, durationMs: Date.now() - start };
 }
 
 function runShell(cmd: string, timeoutMs = 10_000): string {
@@ -374,6 +384,7 @@ async function main(): Promise<void> {
   let attachedClientPid: number | null = null;
   let toggleFailures = 0;
   let permissionApproveAttempts = 0;
+  const toggleDurationsMs: number[] = [];
   let lastButlerState: ButlerWorkspaceState | null = null;
   let traceBeforeCleanup: string[] = [];
 
@@ -396,7 +407,7 @@ async function main(): Promise<void> {
 
   try {
     for (let i = 1; i <= ITERATIONS; i += 1) {
-      let toggleResult = run(
+      let toggleResult = runTimed(
         [
           "--session",
           session,
@@ -415,7 +426,7 @@ async function main(): Promise<void> {
         permissionApproveAttempts += 1;
         approvePluginPermissions(session);
         await sleep(150);
-        toggleResult = run(
+        toggleResult = runTimed(
           [
             "--session",
             session,
@@ -434,6 +445,7 @@ async function main(): Promise<void> {
       if (toggleResult.status !== 0) {
         toggleFailures += 1;
       }
+      toggleDurationsMs.push(toggleResult.durationMs);
       run(["--session", session, "action", "switch-mode", "normal"], true);
       await sleep(SLEEP_MS);
 
@@ -453,6 +465,8 @@ async function main(): Promise<void> {
           phase: "sample",
           iteration: i,
           toggleStatus: toggleResult.status,
+          toggleDurationMs: toggleResult.durationMs,
+          toggleStderr: toggleResult.status === 0 ? undefined : toggleResult.stderr.trim(),
           serverPid: pid,
           rssKb,
           ...stats,
@@ -491,6 +505,8 @@ async function main(): Promise<void> {
   const hasSurvivors = survivors.length > 0;
 
   const failures: string[] = [];
+  const maxToggleDurationMs = toggleDurationsMs.length ? Math.max(...toggleDurationsMs) : null;
+  const minToggleDurationMs = toggleDurationsMs.length ? Math.min(...toggleDurationsMs) : null;
   if (maxJellyLikeFloating < 1) {
     failures.push("no_jelly_like_floating_pane_observed");
   }
@@ -517,6 +533,8 @@ async function main(): Promise<void> {
       maxNonPluginFloating,
       maxJellyLikeFloating,
       maxBlankFloating,
+      minToggleDurationMs,
+      maxToggleDurationMs,
       toggleFailures,
       permissionApproveAttempts,
       lastButlerState,
