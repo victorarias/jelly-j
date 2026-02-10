@@ -153,6 +153,15 @@ These are implementation constraints agents should treat as hard-won invariants 
    - Keep `update()` returning `false` unless a real UI repaint is required.
    - Symptom of violation: toggle latency grows with each press (eg. 50ms → seconds) while client/plugin counts stay flat.
 
+13. Use staged isolation before changing Zellij internals.
+   - Split regressions into 3 loops and measure each independently:
+     1) message delivery latency (`zellij pipe` round-trip time),
+     2) plugin-instance fanout (client/plugin counts),
+     3) pane open/hide action latency.
+   - If latency grows while client/plugin counts remain flat, prioritize plugin event/render feedback loops before host routing changes.
+   - Instrument harnesses with per-iteration timing (`toggleDurationMs`) and keep min/max summaries in output.
+   - Only escalate to Zellij host changes after reproducing the issue in a minimal isolated loop and ruling out plugin-local causes.
+
 ## npm Distribution
 
 Published as `jelly-j` on npm. Build output is ESM with `#!/usr/bin/env bun` shebang and `dist/` is the published payload.
