@@ -1,6 +1,6 @@
 # Global Presence Plan (One Jelly J Backend Per Computer)
 
-Status: `planned`  
+Status: `in_progress` (A-D complete, E partial)  
 Owner: Jelly J agents  
 Last updated: 2026-02-11
 
@@ -13,16 +13,27 @@ Implement true "one Jelly J per computer" semantics:
 - explicit session-switch awareness when user messages from another session
 - cross-session scrollback replay when opening UI in a new session
 
+## Progress
+
+- [x] Phase A: control-plane split (`daemon` + `ui` + default bootstrap)
+- [x] Phase B: chat/session state moved to daemon
+- [x] Phase B2: global history store + replay on UI connect
+- [x] Phase C: session-switch context note injection
+- [x] Phase D: Alt+j path uses UI client launch command (`jelly-j ui`)
+- [~] Phase E: hardening/observability (toggle tracing + harness coverage + stale-resume recovery done; daemon status/restart commands still pending)
+
 ## Clarified Semantics
 
 - This is **not** "only one Zellij session can use Jelly J".
 - This **is** "one backend process, many session-local frontends".
 - `Alt+j` in any session should open/hide that session's Jelly J pane and connect to the same backend.
 
-## Current Gap
+## Current State
 
-Today `src/index.ts` enforces a global lock for the **UI process** itself.  
-Result: opening Jelly J in another session can fail with "already running" instead of connecting to the same backend.
+Global lock ownership now belongs to the daemon, not UI clients:
+- `jelly-j` (default) ensures daemon is running, then opens UI.
+- `jelly-j ui` opens another frontend attached to the same backend.
+- `jelly-j daemon` runs the singleton backend process.
 
 ## Target Architecture
 
@@ -105,7 +116,7 @@ V2 (optional later):
 
 ## Implementation Phases
 
-## Phase A: Control-plane skeleton (`in_progress` once started)
+## Phase A: Control-plane skeleton (`done`)
 
 1. Add `src/daemon.ts` with singleton lock ownership and IPC server.
 2. Add `src/ui-client.ts` to connect and stream events to terminal.
@@ -116,7 +127,7 @@ Exit criteria:
 - two separate terminals can run `jelly-j ui` concurrently
 - both connect to same daemon pid
 
-## Phase B: Move chat execution to daemon
+## Phase B: Move chat execution to daemon (`done`)
 
 1. Move `chat()` calls and session persistence (`state.json`) into daemon.
 2. Keep one global `sessionId` in daemon state.
@@ -127,7 +138,7 @@ Exit criteria:
 - conversation continues seamlessly from any session UI
 - daemon survives UI pane close/reopen
 
-## Phase B2: Scrollback replay (required for global presence UX)
+## Phase B2: Scrollback replay (required for global presence UX) (`done`)
 
 1. Introduce structured global history store (eg `~/.jelly-j/history.jsonl`).
 2. Write chat events with `session`, `role`, `text`, `timestamp`.
@@ -138,7 +149,7 @@ Exit criteria:
 - opening Jelly J in Session B immediately shows recent turns from Session A
 - no duplicate replay on reconnect unless explicitly requested
 
-## Phase C: Session-switch context behavior
+## Phase C: Session-switch context behavior (`done`)
 
 1. Add daemon session tracker (`lastActiveSession`).
 2. Inject session-change context note on first message in new session.
@@ -147,7 +158,7 @@ Exit criteria:
 Exit criteria:
 - message in session B after session A yields explicit context-switch note
 
-## Phase D: Integrate with Alt+j UX
+## Phase D: Integrate with Alt+j UX (`done`)
 
 1. Update plugin launch command from `jelly-j` to `jelly-j ui`.
 2. Keep hide/show logic unchanged.
@@ -157,12 +168,13 @@ Exit criteria:
 - no "already running" error pane
 - per-session toggle works, global backend remains one process
 
-## Phase E: Hardening + observability
+## Phase E: Hardening + observability (`partial`)
 
 1. Add daemon health command (`jelly-j status`).
 2. Add restart command (`jelly-j restart-daemon`).
 3. Add daemon logs ring buffer and retrieval command.
 4. Add socket/lock stale cleanup and clear error messages.
+5. Recover automatically from stale Claude resume state (`No conversation found with session ID ...`) by retrying once with a fresh session.
 
 Exit criteria:
 - predictable restart/recovery after crashes or stale sockets
@@ -179,8 +191,12 @@ Exit criteria:
   - spawn daemon + two UI clients with different `ZELLIJ_SESSION_NAME`
   - assert same daemon pid and shared conversation id
   - assert session-switch note only on session changes
+- Harness:
+  - `npm run test:harness:global` (isolated `JELLY_J_STATE_DIR`; daemon/socket/history + stale-session chat recovery smoke)
+  - For offline/debug-only runs, allow `JJ_SKIP_CHAT_PROBE=1` (but default CI/local verification should keep chat probe enabled).
 - Existing harness:
   - retain Alt+j toggle latency/failure checks
+  - require daemon protocol health checks during Alt+j loops
 
 ## Manual acceptance
 
@@ -195,17 +211,16 @@ Exit criteria:
 ## Risks / Tradeoffs
 
 - Multi-client concurrent prompts:
-  - define serialization policy (queue globally vs per-client cancellation).
+  - current implementation serializes requests globally in the daemon queue.
 - Shared model state:
-  - global model changes affect all UIs unless scoped.
+  - current implementation keeps model selection global across all UI clients.
 - IPC complexity:
   - requires robust stream lifecycle handling and reconnection.
 
 ## Open Decisions
 
-1. Concurrency policy: queue one prompt globally, or allow parallel prompts with cancellation?
-2. Model scope: global model selection or per-client model selection?
-3. Background lifetime: keep daemon always-on, or add idle timeout auto-shutdown?
+1. Background lifetime: keep daemon always-on, or add idle timeout auto-shutdown?
+2. Add explicit daemon CLI ops (`status`, `restart-daemon`) or keep ops external-only.
 
 ## Upstream/Zellij Note
 

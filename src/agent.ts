@@ -156,6 +156,10 @@ export type ChatEvents = {
   onPermissionRequest?: (toolName: string, reason: string) => void;
 };
 
+export type ChatRuntimeOptions = {
+  nonInteractive?: boolean;
+};
+
 const BASH_TOOL_NAMES = new Set(["Bash"]);
 const WRITE_TOOL_NAMES = new Set([
   "FileEdit",
@@ -402,7 +406,8 @@ export async function chat(
   sessionId: string | undefined,
   model: ChatModel,
   sessionContextNote: string | undefined,
-  events: ChatEvents = {}
+  events: ChatEvents = {},
+  runtimeOptions: ChatRuntimeOptions = {}
 ): Promise<{ sessionId?: string }> {
   let newSessionId: string | undefined;
   const zellijConfigInfo = await getZellijConfigInfo();
@@ -431,8 +436,11 @@ export async function chat(
     maxTurns: 20,
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
-    hooks: buildPermissionHooks(zellijConfigInfo, events),
   };
+
+  if (!runtimeOptions.nonInteractive) {
+    options.hooks = buildPermissionHooks(zellijConfigInfo, events);
+  }
 
   if (additionalDirectories.length > 0) {
     options.additionalDirectories = additionalDirectories;
@@ -490,7 +498,11 @@ export async function heartbeatQuery(
   layoutDump: string,
   tabNames: string
 ): Promise<string> {
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown";
   const prompt = `Current Zellij workspace state:
+
+Current local time: ${now.toISOString()} (${tz})
 
 Tab names: ${tabNames}
 

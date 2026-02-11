@@ -75,13 +75,15 @@ keybinds {
 
 ### Singleton semantics
 
-- Jelly J enforces a global process lock at `~/.jelly-j/agent.lock.json`.
-- Only one `jelly-j` process can run per computer at a time.
-- If a second instance starts, it exits immediately and tells you where the active one is.
-- `Ctrl-C` does not exit Jelly J.
-- `exit` / `quit` input is intentionally disabled.
-- If stdin/pane closes unexpectedly, Jelly J auto-restarts into a fresh floating pane.
+- Jelly J enforces one global backend daemon per computer (`~/.jelly-j/agent.lock.json`).
+- `jelly-j` in any Zellij session opens a local UI client that connects to that same daemon.
+- Multiple sessions can have a Jelly J UI pane at the same time, sharing one conversation context.
+- New UI clients replay recent global history from `~/.jelly-j/history.jsonl` on connect.
+- `Ctrl-C` does not exit the UI client.
+- `exit` / `quit` input is intentionally disabled (hide/show with `Alt+j` instead).
+- If a UI pane closes, the daemon stays alive; pressing `Alt+j` opens a fresh connected UI.
 - If restart gets stuck in a weird state, run `npm run ops:restart` (lock-aware, timeout-bounded).
+- For isolated test runs, set `JELLY_J_STATE_DIR=/tmp/some-dir` to isolate Jelly J state without changing `HOME`.
 
 ### Fish shell helper (optional)
 
@@ -131,8 +133,9 @@ end
    └───────────┘
 ```
 
-- **REPL**: readline prompt in a floating Zellij pane
-- **Agent**: Claude Opus 4.6 via the [Agent SDK](https://docs.anthropic.com/en/docs/claude-code/agent-sdk)
+- **UI client**: session-local readline prompt in a floating Zellij pane
+- **Daemon backend**: one global process handling chat execution, model/session state, and history replay
+- **Agent runtime**: Claude Opus 4.6 via the [Agent SDK](https://docs.anthropic.com/en/docs/claude-code/agent-sdk)
 - **Butler plugin**: persistent Zellij WASM plugin handling `Alt+j` toggle and pipe IPC
 - **Tools**: Zellij MCP tools + Claude Code built-in agentic tools (Read/Edit/Write/Grep/Glob/Bash/Task)
 - **Permission policy**: Bash always prompts; writes outside detected Zellij config roots always prompt

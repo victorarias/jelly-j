@@ -81,7 +81,7 @@ async function stopExistingAgentFromLock(): Promise<{ stoppedPid?: number; force
 async function relaunchJellyJPane(): Promise<void> {
   await execFileAsync(
     "zellij",
-    ["run", "-f", "--name", "Jelly J", "--", "jelly-j"],
+    ["run", "-f", "--name", "Jelly J", "--", "jelly-j", "ui"],
     { timeout: CMD_TIMEOUT_MS }
   );
 }

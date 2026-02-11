@@ -26,7 +26,7 @@ cp plugin/target/wasm32-wasip1/release/jelly-j.wasm ~/.config/zellij/plugins/
 
 ## Architecture
 
-Two components: a **Bun REPL** (the assistant) and a **Rust WASM plugin** (the persistent butler).
+Three components: a **Bun UI client**, a **Bun daemon backend**, and a **Rust WASM plugin** (the persistent butler).
 
 ## Mandatory Reference For Plugin Work
 
@@ -37,24 +37,29 @@ Maintenance rule:
 - If you find any statement in that guide is wrong, update it as part of your change.
 - Treat the currently pinned dependency target as canonical. Right now this repo targets local Zellij `main` via path dependency; if that changes, update the guide in the same change.
 
-### Bun REPL (`src/`)
+### Bun Runtime (`src/`)
 
 ```
-index.ts      → Readline REPL loop, terminal title, global session resume/save
+index.ts      → Entry point: mode parsing (`daemon`, `ui`, default), daemon bootstrap
+daemon.ts     → Global singleton backend (socket server, chat execution queue, shared model/session state)
+ui-client.ts  → Session-local readline frontend connected to daemon over Unix socket
+protocol.ts   → Newline-delimited JSON message contracts for daemon/UI IPC
+history.ts    → Global chat history store (`~/.jelly-j/history.jsonl`) + snapshot replay
 agent.ts      → Claude Agent SDK integration: chat() + heartbeatQuery()
 tools.ts      → MCP tools (zellij actions + butler IPC helpers)
 zellij.ts     → Thin wrapper: execFile("zellij", ["action", ...args]) with timeout
 zellijPipe.ts → Thin wrapper: execFile("zellij", ["pipe", ...args]) for butler RPC
-state.ts      → Read/write ~/.jelly-j/state.json + enforce global process lock (~/.jelly-j/agent.lock.json)
+state.ts      → Read/write `~/.jelly-j/state.json`, daemon lock `~/.jelly-j/agent.lock.json`, socket path
 heartbeat.ts  → Every 5min, asks butler for cached state, asks Haiku if tidying is needed
 ```
 
 Data flow:
-- User types in REPL
-- `chat()` sends to Claude Opus via Agent SDK
+- User types in UI client
+- UI sends request to daemon
+- Daemon calls `chat()` via Agent SDK
 - Claude calls MCP tools
 - Tools use either `zellij action` (direct) or butler pipe RPC (`zellij pipe`)
-- Results stream back to REPL
+- Results stream back through daemon to the requesting UI client
 
 Agent SDK details:
 - Each `query()` call spawns a Claude Code subprocess.
@@ -90,10 +95,10 @@ Key flags:
 
 - Persistent butler: single long-lived plugin instance.
 - `MessagePlugin` keybind for `Alt+j` toggle delivery.
-- Atomic `launch_terminal_pane(..., stdin_write=Some(\"jelly-j\\n\"), ...)` for launch + command injection.
+- Atomic `launch_terminal_pane(..., stdin_write=Some(\"jelly-j ui\\n\"), ...)` for launch + command injection.
 - Pipe IPC (`zellij pipe`) for no-focus-switch tab/pane operations.
 - Global conversation continuity in `~/.jelly-j/state.json` (intentional, shared across zellij sessions).
-- Global singleton process lock in `~/.jelly-j/agent.lock.json` (one jelly-j process per computer).
+- Global singleton daemon lock in `~/.jelly-j/agent.lock.json` (one jelly-j backend per computer).
 - Bun runtime and bundling (`bun build ... --target bun`).
 - Plain text output: system prompt forbids markdown because REPL is raw terminal.
 
@@ -118,7 +123,7 @@ These are implementation constraints agents should treat as hard-won invariants 
    - Store last CLI pipe id and no-op duplicates to avoid double-toggle flicker.
 
 5. Prefer atomic terminal launch with inline stdin write over multi-step launch state machines.
-   - Reliable path here: `launch_terminal_pane(..., stdin_write=Some(\"jelly-j\\n\"), ...)`.
+   - Reliable path here: `launch_terminal_pane(..., stdin_write=Some(\"jelly-j ui\\n\"), ...)`.
    - Avoid `awaiting_pane`/`relocating_*` loops unless a future regression proves they are needed.
 
 6. Harness runs must seed plugin permission cache for URL variants.
@@ -132,12 +137,13 @@ These are implementation constraints agents should treat as hard-won invariants 
    - Capture `get_trace` and `get_state` before cleanup in failing harness runs.
    - Prefer trace evidence over assumptions about zellij event ordering.
 
-9. Preserve global singleton semantics in REPL process management.
-   - Startup must acquire the global lock before initializing interactive loop.
-   - Shutdown/fatal paths must release lock best-effort.
-   - `Ctrl-C` must not terminate Jelly J.
-   - `exit`/`quit` input must stay disabled (single global agent semantics).
-   - Unexpected stdin close/signals should relaunch Jelly J in a fresh pane.
+9. Preserve global singleton semantics in runtime process management.
+   - The daemon owns the global lock; UI clients must never fail just because lock exists.
+   - Default startup must be: ensure daemon running, then start UI.
+   - Daemon shutdown/fatal paths must release lock and socket best-effort.
+   - `Ctrl-C` must not terminate the UI client.
+   - `exit`/`quit` input must stay disabled (single global backend semantics).
+   - UI close should leave daemon alive; reopening via `Alt+j` must reconnect.
 
 10. Never use raw `zellij pipe` for ops/restart flows without a timeout.
    - `zellij pipe` can block if a plugin-side CLI pipe is never unblocked.
@@ -168,6 +174,34 @@ These are implementation constraints agents should treat as hard-won invariants 
    - This does not mean "only one session can host Jelly J UI".
    - If a second session invokes Jelly J, it should connect to the existing backend and emit a session-switch context signal, not fail with "already running".
    - If behavior currently contradicts this, treat it as an architecture gap (missing global IPC/control-plane), not a lock-policy success.
+
+15. Validate daemon behavior in an isolated HOME when possible.
+   - Prefer `npm run test:harness:global` for daemon/socket smoke checks.
+   - Avoid killing or mutating the live daemon while debugging unless explicitly requested.
+   - Isolation avoids false negatives caused by user-local locks/history.
+
+16. For Unix socket readiness, do not rely on `Bun.file(path).exists()`.
+   - In Bun, `Bun.file(...).exists()` can return false for active Unix domain sockets.
+   - Use `fs.stat(...).isSocket()` or an actual connect probe to verify daemon readiness.
+
+17. Alt+j harness must validate daemon protocol health, not just pane toggling.
+   - A passing toggle loop can still hide a dead/unresponsive daemon.
+   - Require protocol-level success (`register_client` + `ping/pong`) during harness runs.
+
+18. Global-presence harness must exercise a real chat turn, not only register/ping.
+   - Pure socket health checks can pass while Claude resume state is broken.
+   - Seed a stale `sessionId` and assert daemon recovery (fresh-session retry) with a successful reply.
+   - Treat `"No conversation found with session ID ..."` and follow-on `code 1` as a recoverable resume failure path.
+   - `JJ_SKIP_CHAT_PROBE=1` is only for offline debugging; default verification keeps chat probe enabled.
+
+19. For daemon/chat harness isolation, prefer `JELLY_J_STATE_DIR` over `HOME` overrides.
+   - Changing `HOME` can hide Claude auth and produce false negatives (`Not logged in · Please run /login`).
+   - Keep user HOME/auth intact; isolate only Jelly J runtime files (`state.json`, `history.jsonl`, lock, socket, logs).
+
+20. Cross-tab relocation requires explicit re-float after `break_panes_to_tab_with_index`.
+   - On current Zellij `main`, moving Jelly across tabs can re-materialize it as tiled (vertical split).
+   - Required sequence: hide -> `break_panes_to_tab_with_index` -> `toggle_pane_embed_or_eject_for_pane_id` -> `show_pane_with_id(..., true, true)`.
+   - Keep a harness assertion that opening Jelly from another tab yields a floating pane on the active tab.
 
 ## npm Distribution
 

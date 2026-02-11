@@ -5,9 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use zellij_tile::prelude::*;
 
 const PANE_NAME: &str = "Jelly J";
-const COMMAND: &str = "jelly-j";
+const COMMAND: &str = "jelly-j ui";
 const TRACE_LIMIT: usize = 200;
 const TOGGLE_DEDUP_WINDOW_MS: u128 = 100;
+const TRACKED_PANE_MISSING_GRACE_MS: u128 = 1_500;
 
 #[derive(Default)]
 struct State {
@@ -27,6 +28,7 @@ struct State {
     trace_seq: u64,
     trace: VecDeque<String>,
     last_toggle_epoch_ms: Option<u128>,
+    tracked_pane_missing_since_ms: Option<u128>,
     trace_start_epoch_ms: Option<u128>,
 }
 
@@ -155,8 +157,30 @@ impl ZellijPlugin for State {
                 self.panes = Some(manifest);
                 if let Some(pane_id) = self.jelly_pane_id {
                     if self.find_terminal_pane_by_id(pane_id).is_none() {
-                        self.push_trace(format!("tracked_jelly_pane_missing id={}", pane_id));
-                        self.jelly_pane_id = None;
+                        let now_ms = Self::now_epoch_millis();
+                        match self.tracked_pane_missing_since_ms {
+                            None => {
+                                self.tracked_pane_missing_since_ms = Some(now_ms);
+                                self.push_trace(format!(
+                                    "tracked_jelly_pane_temporarily_missing id={}",
+                                    pane_id
+                                ));
+                            }
+                            Some(since_ms)
+                                if now_ms.saturating_sub(since_ms)
+                                    > TRACKED_PANE_MISSING_GRACE_MS =>
+                            {
+                                self.push_trace(format!(
+                                    "tracked_jelly_pane_missing_timeout_clear id={}",
+                                    pane_id
+                                ));
+                                self.jelly_pane_id = None;
+                                self.tracked_pane_missing_since_ms = None;
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        self.tracked_pane_missing_since_ms = None;
                     }
                 }
                 self.infer_cached_permission_grant();
@@ -479,16 +503,28 @@ impl State {
 
     fn is_jelly_pane(&self, pane: &PaneInfo) -> bool {
         let launch_command = self.launch_command();
+        let launch_executable = launch_command
+            .split_whitespace()
+            .next()
+            .unwrap_or(launch_command);
         !pane.exited
             && !pane.is_plugin
             && (pane.title == PANE_NAME
                 || pane
                     .terminal_command
                     .as_deref()
-                    .is_some_and(|command| command.contains(launch_command)))
+                    .is_some_and(|command| {
+                        command.contains(launch_command) || command.contains(launch_executable)
+                    }))
     }
 
     fn active_tab_index(&self) -> Option<usize> {
+        if let Some(tabs) = self.tabs.as_ref() {
+            if let Some(tab) = tabs.iter().find(|tab| tab.active) {
+                return Some(tab.position);
+            }
+        }
+
         let manifest = self.panes.as_ref()?;
         if let Some((tab_index, _)) = manifest.panes.iter().find(|(_, panes)| {
             panes.iter().any(|pane| {
@@ -503,12 +539,6 @@ impl State {
                 .any(|pane| pane.is_focused && !pane.exited && !pane.is_plugin)
         }) {
             return Some(*tab_index);
-        }
-
-        if let Some(tabs) = self.tabs.as_ref() {
-            if let Some(tab) = tabs.iter().find(|tab| tab.active) {
-                return Some(tab.position);
-            }
         }
 
         manifest.panes.keys().min().copied()
@@ -616,23 +646,44 @@ impl State {
                 }
                 self.push_trace(format!("hiding_jelly_pane id={}", keep_pane.id));
                 hide_pane_with_id(keep_ref);
+            } else if keep_tab != current_tab {
+                self.push_trace(format!(
+                    "moving_jelly_to_current_tab_via_hidden_break id={} old_tab={} new_tab={}",
+                    keep_pane.id, keep_tab, current_tab
+                ));
+                hide_pane_with_id(keep_ref);
+                break_panes_to_tab_with_index(&[keep_ref], current_tab, false);
+                self.push_trace(format!(
+                    "re_float_jelly_after_break id={} to_tab={}",
+                    keep_pane.id, current_tab
+                ));
+                toggle_pane_embed_or_eject_for_pane_id(keep_ref);
+                show_pane_with_id(keep_ref, true, true);
             } else {
                 self.push_trace(format!(
                     "showing_jelly_pane id={} from_tab={} to_tab={} via_show_pane_with_id",
                     keep_pane.id, keep_tab, current_tab
                 ));
-                if keep_tab != current_tab {
-                    break_panes_to_tab_with_index(&[keep_ref], current_tab, false);
-                }
                 show_pane_with_id(keep_ref, true, true);
             }
             return;
         }
 
+        self.launch_new_jelly_terminal();
+    }
+
+    fn launch_new_jelly_terminal(&mut self) {
         self.push_trace(format!(
             "launching_new_jelly_terminal atomically command={}",
             self.launch_command()
         ));
+        if let Some(pane_id) = self.jelly_pane_id {
+            self.push_trace(format!(
+                "launch_skipped_tracked_jelly_pending id={}",
+                pane_id
+            ));
+            return;
+        }
         match launch_terminal_pane(
             Some(FileToOpen::new(".")),
             Some(PANE_NAME.to_owned()),
@@ -645,6 +696,7 @@ impl State {
             Ok(PaneId::Terminal(pane_id)) => {
                 self.push_trace(format!("launched_new_jelly_terminal pane_id={}", pane_id));
                 self.jelly_pane_id = Some(pane_id);
+                request_plugin_state_snapshot();
                 show_pane_with_id(PaneId::Terminal(pane_id), true, true);
             }
             Ok(pane_id) => {

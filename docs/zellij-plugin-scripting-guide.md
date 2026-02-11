@@ -63,6 +63,7 @@ bind "Alt j" {
 Guidelines:
 - Do not use `LaunchOrFocusPlugin` for Jelly J anymore.
 - Do not set `launch_new true` for this bind (singleton behavior is required).
+- Default launch command should target UI mode (`jelly-j ui`) so plugin-launched panes always act as clients of the global daemon.
 
 ## 4) Pipe Protocol
 
@@ -111,8 +112,9 @@ Toggle behavior must avoid multi-event wait loops:
 1. Snapshot pane manifest.
 2. Keep exactly one Jelly pane; close extras.
 3. If Jelly is visible in the current tab, hide it.
-4. Otherwise move it to the current tab (if needed) and reveal via `focus_terminal_pane(..., true, false)`.
-5. If none exists, launch atomically with `launch_terminal_pane(..., stdin_write=Some("jelly-j\\n"), floating=true, ...)`.
+4. If Jelly exists in another tab, move it with `break_panes_to_tab_with_index`, then force float via `toggle_pane_embed_or_eject_for_pane_id`, then reveal.
+5. Otherwise reveal via `show_pane_with_id(..., true, true)`.
+6. If none exists, launch atomically with `launch_terminal_pane(..., stdin_write=Some("jelly-j ui\\n"), floating=true, ...)`.
 
 Why:
 - Prevents stale `awaiting_*` / `relocating_*` state.
@@ -140,7 +142,7 @@ If users report `Alt+j` instability:
 1. Verify keybind uses `MessagePlugin` and `name "toggle"`.
 2. Verify plugin remains persistent (`hide_self` only, no per-toggle `close_self`).
 3. Verify toggle path does not depend on `awaiting_*` / `relocating_*` loops.
-4. Verify reveal path uses `focus_terminal_pane(..., true, false)` and keeps one Jelly pane.
+4. Verify reveal path uses `show_pane_with_id(..., true, true)` and keeps one Jelly pane.
 5. Re-run multi-tab e2e stress tests and inspect `dump-layout` output.
 
 ## 10) Test Requirements
@@ -150,7 +152,9 @@ e2e harnesses should assert:
 - Repeated `Alt+j` does not create blank floating panes.
 - Session keeps at most one Jelly-like assistant pane.
 - Hidden-in-tab-A then first-open-in-tab-B restores floating (not docked).
+- Hidden/visible-in-tab-A then first-open-in-tab-B must never create a tiled Jelly pane.
 - Pipe IPC `ping` and `get_state` return valid JSON envelopes.
+- Daemon control-plane is healthy while toggling (`register_client` + `ping/pong` over `~/.jelly-j/daemon.sock`).
 
 ## 11) Sources
 

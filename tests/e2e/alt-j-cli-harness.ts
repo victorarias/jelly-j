@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { createConnection } from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -21,14 +23,35 @@ type FloatingPaneStats = {
 };
 
 type ButlerPaneState = {
+  id: number;
+  tab_index: number;
   title: string;
   terminal_command?: string | null;
   is_plugin: boolean;
   is_floating: boolean;
+  is_suppressed?: boolean;
+  exited?: boolean;
+};
+
+type ButlerTabState = {
+  position: number;
+  name: string;
+  active: boolean;
 };
 
 type ButlerWorkspaceState = {
+  tabs?: ButlerTabState[];
   panes: ButlerPaneState[];
+  butler?: {
+    jelly_pane_id?: number | null;
+  };
+};
+
+type DaemonProbeResult = {
+  ok: boolean;
+  daemonPid?: number;
+  error?: string;
+  durationMs: number;
 };
 
 const ZELLIJ_BIN = process.env.ZELLIJ_BIN ?? "zellij";
@@ -45,6 +68,7 @@ const REQUIRED_PERMISSIONS = [
   "WriteToStdin",
   "ReadCliPipes",
 ];
+const DAEMON_SOCKET_PATH = path.join(os.homedir(), ".jelly-j", "daemon.sock");
 
 function run(args: string[], allowFailure = false, timeoutMs = 10_000): CmdResult {
   try {
@@ -278,6 +302,183 @@ function parseFloatingPaneStatsFromButlerState(state: ButlerWorkspaceState): Flo
   };
 }
 
+function isJellyPane(pane: ButlerPaneState): boolean {
+  const command = pane.terminal_command ?? "";
+  return pane.title === "Jelly J" || command.includes("jelly-j");
+}
+
+function activeTabPosition(state: ButlerWorkspaceState): number | undefined {
+  return state.tabs?.find((tab) => tab.active)?.position;
+}
+
+function goToTab(session: string, position: number, tabName?: string): void {
+  if (tabName) {
+    run(
+      [
+        "--session",
+        session,
+        "action",
+        "go-to-tab-name",
+        tabName,
+      ],
+      true,
+    );
+  }
+  run(
+    ["--session", session, "action", "go-to-tab", String(position)],
+    true,
+  );
+}
+
+function toggleFromHarness(session: string): TimedCmdResult {
+  return runTimed(
+    [
+      "--session",
+      session,
+      "pipe",
+      "--name",
+      "toggle",
+      "--plugin",
+      PLUGIN_URL,
+      "--",
+      "toggle",
+    ],
+    true,
+    3_500,
+  );
+}
+
+async function runCrossTabFloatingCheck(session: string): Promise<{
+  ok: boolean;
+  reason?: string;
+  activeTab?: number;
+  jellyOnActive?: number;
+  jellyFloatingOnActive?: number;
+}> {
+  const secondTabName = `jj-harness-tab-${Date.now().toString(36)}`;
+
+  goToTab(session, 1);
+  await sleep(120);
+
+  // Ensure we have a live Jelly pane before switching tabs.
+  toggleFromHarness(session);
+  await sleep(220);
+  let state = queryButlerState(session);
+  if (!state) {
+    return { ok: false, reason: "cross_tab_state_unavailable_after_toggle_1" };
+  }
+  const activeTabAfterFirstToggle = activeTabPosition(state);
+  const jellyVisibleOnActiveAfterFirstToggle =
+    activeTabAfterFirstToggle !== undefined &&
+    state.panes.some(
+      (pane) =>
+        pane.tab_index === activeTabAfterFirstToggle &&
+        isJellyPane(pane) &&
+        !pane.is_suppressed
+    );
+  if (!jellyVisibleOnActiveAfterFirstToggle) {
+    toggleFromHarness(session);
+    await sleep(220);
+    state = queryButlerState(session);
+    if (!state) {
+      return { ok: false, reason: "cross_tab_state_unavailable_after_toggle_2" };
+    }
+  }
+
+  run(["--session", session, "action", "new-tab", "--name", secondTabName], true);
+  await sleep(120);
+  goToTab(session, 2, secondTabName);
+  await sleep(120);
+  // Some Zellij versions treat go-to-tab as zero-based.
+  goToTab(session, 1, secondTabName);
+  await sleep(120);
+
+  const stateAfterTabSwitch = queryButlerState(session);
+  if (!stateAfterTabSwitch) {
+    return { ok: false, reason: "cross_tab_state_unavailable_after_tab_switch" };
+  }
+  const activeAfterTabSwitch = activeTabPosition(stateAfterTabSwitch);
+  if (activeAfterTabSwitch === undefined || activeAfterTabSwitch === 0) {
+    return {
+      ok: false,
+      reason: "cross_tab_failed_to_focus_second_tab",
+      activeTab: activeAfterTabSwitch,
+    };
+  }
+
+  const toggleResult = toggleFromHarness(session);
+  if (toggleResult.status !== 0) {
+    return {
+      ok: false,
+      reason: `cross_tab_toggle_failed:${toggleResult.status}`,
+    };
+  }
+  await sleep(260);
+
+  const finalState = queryButlerState(session);
+  if (!finalState) {
+    return { ok: false, reason: "cross_tab_state_unavailable_after_tab2_toggle" };
+  }
+
+  let lastActiveTab = activeTabPosition(finalState);
+  let lastJellyOnActive = 0;
+  let lastJellyFloatingOnActive = 0;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const state = queryButlerState(session);
+    if (!state) {
+      await sleep(120);
+      continue;
+    }
+
+    const activeTab = activeTabPosition(state);
+    if (activeTab === undefined) {
+      await sleep(120);
+      continue;
+    }
+
+    const trackedJellyPaneId = state.butler?.jelly_pane_id ?? undefined;
+    const jellyOnActive = state.panes.filter((pane) => {
+      if (pane.tab_index !== activeTab || pane.is_plugin || pane.exited) return false;
+      if (isJellyPane(pane)) return true;
+      return trackedJellyPaneId !== undefined && pane.id === trackedJellyPaneId;
+    });
+    const jellyFloatingOnActive = jellyOnActive.filter((pane) => pane.is_floating);
+
+    lastActiveTab = activeTab;
+    lastJellyOnActive = jellyOnActive.length;
+    lastJellyFloatingOnActive = jellyFloatingOnActive.length;
+
+    if (jellyOnActive.length === 0) {
+      await sleep(120);
+      continue;
+    }
+    if (jellyFloatingOnActive.length === 0) {
+      return {
+        ok: false,
+        reason: "cross_tab_jelly_not_floating",
+        activeTab,
+        jellyOnActive: jellyOnActive.length,
+        jellyFloatingOnActive: jellyFloatingOnActive.length,
+      };
+    }
+
+    return {
+      ok: true,
+      activeTab,
+      jellyOnActive: jellyOnActive.length,
+      jellyFloatingOnActive: jellyFloatingOnActive.length,
+    };
+  }
+
+  return {
+    ok: false,
+    reason: "cross_tab_no_jelly_on_active_tab",
+    activeTab: lastActiveTab,
+    jellyOnActive: lastJellyOnActive,
+    jellyFloatingOnActive: lastJellyFloatingOnActive,
+  };
+}
+
 function queryButlerState(session: string): ButlerWorkspaceState | null {
   const request = run(
     [
@@ -377,6 +578,108 @@ function rssKbForPid(pid: number): number | null {
   return Number.isNaN(value) ? null : value;
 }
 
+async function probeDaemonProtocol(timeoutMs = 2_000): Promise<DaemonProbeResult> {
+  const start = Date.now();
+  const clientId = `harness-${process.pid}-${Date.now().toString(36)}`;
+  const requestId = randomUUID();
+
+  return await new Promise<DaemonProbeResult>((resolve) => {
+    const socket = createConnection(DAEMON_SOCKET_PATH);
+    let settled = false;
+    let buffer = "";
+    let daemonPid: number | undefined;
+
+    const finish = (result: Omit<DaemonProbeResult, "durationMs">): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        socket.destroy();
+      } catch {
+        // best effort
+      }
+      resolve({
+        ...result,
+        durationMs: Date.now() - start,
+      });
+    };
+
+    const timer = setTimeout(() => {
+      finish({ ok: false, error: "daemon_protocol_timeout", daemonPid });
+    }, timeoutMs);
+
+    socket.once("connect", () => {
+      socket.write(
+        `${JSON.stringify({
+          type: "register_client",
+          clientId,
+          zellijSession: "harness",
+          cwd: process.cwd(),
+          hostname: os.hostname(),
+          pid: process.pid,
+        })}\n`,
+      );
+    });
+
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      while (true) {
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) break;
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+
+        try {
+          const parsed = JSON.parse(line) as { type?: string; daemonPid?: number; requestId?: string; message?: string };
+          if (parsed.type === "registered") {
+            daemonPid = parsed.daemonPid;
+            socket.write(
+              `${JSON.stringify({
+                type: "ping",
+                requestId,
+                clientId,
+              })}\n`,
+            );
+            continue;
+          }
+          if (parsed.type === "pong" && parsed.requestId === requestId) {
+            finish({ ok: true, daemonPid: parsed.daemonPid ?? daemonPid });
+            return;
+          }
+          if (parsed.type === "error") {
+            finish({
+              ok: false,
+              daemonPid,
+              error: parsed.message ?? "daemon_error_message",
+            });
+            return;
+          }
+        } catch {
+          // Ignore malformed lines and keep waiting until timeout.
+        }
+      }
+    });
+
+    socket.once("error", (error) => {
+      const err = error as NodeJS.ErrnoException;
+      finish({
+        ok: false,
+        error: err.code ? `daemon_socket_${err.code}` : "daemon_socket_error",
+      });
+    });
+  });
+}
+
+async function probeDaemonProtocolWithRetry(retries = 2): Promise<DaemonProbeResult> {
+  let last = await probeDaemonProtocol();
+  for (let i = 0; i < retries && !last.ok; i += 1) {
+    await sleep(120);
+    last = await probeDaemonProtocol();
+  }
+  return last;
+}
+
 async function main(): Promise<void> {
   const session = `${SESSION_PREFIX}-${Date.now().toString(36)}`;
   const rssSamples: number[] = [];
@@ -387,6 +690,17 @@ async function main(): Promise<void> {
   const toggleDurationsMs: number[] = [];
   let lastButlerState: ButlerWorkspaceState | null = null;
   let traceBeforeCleanup: string[] = [];
+  let daemonProbeFailures = 0;
+  const daemonProbeDurationsMs: number[] = [];
+  let crossTabCheck:
+    | {
+        ok: boolean;
+        reason?: string;
+        activeTab?: number;
+        jellyOnActive?: number;
+        jellyFloatingOnActive?: number;
+      }
+    | undefined;
 
   deleteSessionsByPrefix(SESSION_PREFIX);
   ensurePermissionsCached(PLUGIN_URL);
@@ -407,40 +721,12 @@ async function main(): Promise<void> {
 
   try {
     for (let i = 1; i <= ITERATIONS; i += 1) {
-      let toggleResult = runTimed(
-        [
-          "--session",
-          session,
-          "pipe",
-          "--name",
-          "toggle",
-          "--plugin",
-          PLUGIN_URL,
-          "--",
-          "toggle",
-        ],
-        true,
-        3_500,
-      );
+      let toggleResult = toggleFromHarness(session);
       if (toggleResult.status !== 0) {
         permissionApproveAttempts += 1;
         approvePluginPermissions(session);
         await sleep(150);
-        toggleResult = runTimed(
-          [
-            "--session",
-            session,
-            "pipe",
-            "--name",
-            "toggle",
-            "--plugin",
-            PLUGIN_URL,
-            "--",
-            "toggle",
-          ],
-          true,
-          3_500,
-        );
+        toggleResult = toggleFromHarness(session);
       }
       if (toggleResult.status !== 0) {
         toggleFailures += 1;
@@ -459,6 +745,11 @@ async function main(): Promise<void> {
       const pid = serverPidForSession(session);
       const rssKb = pid ? rssKbForPid(pid) : null;
       if (rssKb !== null) rssSamples.push(rssKb);
+      const daemonProbe = await probeDaemonProtocolWithRetry(i === 1 ? 12 : 3);
+      daemonProbeDurationsMs.push(daemonProbe.durationMs);
+      if (!daemonProbe.ok) {
+        daemonProbeFailures += 1;
+      }
 
       console.log(
         JSON.stringify({
@@ -469,10 +760,16 @@ async function main(): Promise<void> {
           toggleStderr: toggleResult.status === 0 ? undefined : toggleResult.stderr.trim(),
           serverPid: pid,
           rssKb,
+          daemonProbeOk: daemonProbe.ok,
+          daemonProbeDurationMs: daemonProbe.durationMs,
+          daemonProbePid: daemonProbe.daemonPid,
+          daemonProbeError: daemonProbe.ok ? undefined : daemonProbe.error,
           ...stats,
         }),
       );
     }
+
+    crossTabCheck = await runCrossTabFloatingCheck(session);
   } finally {
     traceBeforeCleanup = queryButlerTrace(session, 120);
     stopAttachedClient(attachedClientPid);
@@ -507,6 +804,12 @@ async function main(): Promise<void> {
   const failures: string[] = [];
   const maxToggleDurationMs = toggleDurationsMs.length ? Math.max(...toggleDurationsMs) : null;
   const minToggleDurationMs = toggleDurationsMs.length ? Math.min(...toggleDurationsMs) : null;
+  const maxDaemonProbeDurationMs = daemonProbeDurationsMs.length
+    ? Math.max(...daemonProbeDurationsMs)
+    : null;
+  const minDaemonProbeDurationMs = daemonProbeDurationsMs.length
+    ? Math.min(...daemonProbeDurationsMs)
+    : null;
   if (maxJellyLikeFloating < 1) {
     failures.push("no_jelly_like_floating_pane_observed");
   }
@@ -522,6 +825,12 @@ async function main(): Promise<void> {
   if (toggleFailures > 0) {
     failures.push("toggle_pipe_failed");
   }
+  if (daemonProbeFailures > 0) {
+    failures.push("daemon_protocol_unhealthy");
+  }
+  if (!crossTabCheck?.ok) {
+    failures.push(`cross_tab_check_failed:${crossTabCheck?.reason ?? "unknown"}`);
+  }
 
   console.log(
     JSON.stringify({
@@ -535,7 +844,11 @@ async function main(): Promise<void> {
       maxBlankFloating,
       minToggleDurationMs,
       maxToggleDurationMs,
+      minDaemonProbeDurationMs,
+      maxDaemonProbeDurationMs,
       toggleFailures,
+      daemonProbeFailures,
+      crossTabCheck,
       permissionApproveAttempts,
       lastButlerState,
       traceBeforeCleanup,

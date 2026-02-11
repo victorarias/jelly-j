@@ -33,6 +33,7 @@
     "typecheck": "tsc --noEmit",
     "ops:restart": "bun scripts/restart-jellyj.ts",
     "test:harness:cli": "bun tests/e2e/alt-j-cli-harness.ts",
+    "test:harness:global": "bun tests/e2e/global-presence-harness.ts",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed"
   },

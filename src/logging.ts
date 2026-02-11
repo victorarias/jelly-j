@@ -1,9 +1,9 @@
 import { appendFile, mkdir } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import type { ModelAlias } from "./commands.js";
+import { STATE_DIR } from "./state.js";
 
-const LOG_DIR = path.join(os.homedir(), ".jelly-j");
+const LOG_DIR = STATE_DIR;
 const HEARTBEAT_LOG_PATH = path.join(LOG_DIR, "heartbeat.log");
 const TRANSCRIPT_LOG_PATH = path.join(LOG_DIR, "transcript.log");
 

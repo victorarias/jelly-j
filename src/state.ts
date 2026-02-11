@@ -2,9 +2,18 @@ import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promis
 import os from "node:os";
 import path from "node:path";
 
-const STATE_DIR = path.join(os.homedir(), ".jelly-j");
+function resolveStateDir(): string {
+  const override = process.env.JELLY_J_STATE_DIR?.trim();
+  if (override) {
+    return path.resolve(override);
+  }
+  return path.join(os.homedir(), ".jelly-j");
+}
+
+export const STATE_DIR = resolveStateDir();
 const STATE_PATH = path.join(STATE_DIR, "state.json");
-const AGENT_LOCK_PATH = path.join(STATE_DIR, "agent.lock.json");
+export const AGENT_LOCK_PATH = path.join(STATE_DIR, "agent.lock.json");
+export const DAEMON_SOCKET_PATH = path.join(STATE_DIR, "daemon.sock");
 
 export interface JellyState {
   sessionId?: string;
@@ -36,7 +45,7 @@ function normalizeNumber(value: unknown): number | undefined {
   return asInt > 0 ? asInt : undefined;
 }
 
-function processIsAlive(pid: number): boolean {
+export function processIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -56,7 +65,7 @@ function currentLockOwner(zellijSession?: string): AgentLockOwner {
   };
 }
 
-async function readAgentLock(): Promise<AgentLockOwner | undefined> {
+export async function readAgentLockOwner(): Promise<AgentLockOwner | undefined> {
   try {
     const raw = await readFile(AGENT_LOCK_PATH, "utf8");
     const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -96,7 +105,7 @@ export async function acquireAgentLock(
       if (err.code !== "EEXIST") throw err;
     }
 
-    const existingOwner = await readAgentLock();
+    const existingOwner = await readAgentLockOwner();
     if (existingOwner?.pid === process.pid) {
       return { acquired: true, owner: existingOwner };
     }
@@ -111,11 +120,11 @@ export async function acquireAgentLock(
     }
   }
 
-  return { acquired: false, owner: await readAgentLock() };
+  return { acquired: false, owner: await readAgentLockOwner() };
 }
 
 export async function releaseAgentLock(): Promise<void> {
-  const existingOwner = await readAgentLock();
+  const existingOwner = await readAgentLockOwner();
   if (existingOwner?.pid && existingOwner.pid !== process.pid) {
     return;
   }
