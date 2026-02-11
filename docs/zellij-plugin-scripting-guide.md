@@ -155,6 +155,10 @@ e2e harnesses should assert:
 - Hidden/visible-in-tab-A then first-open-in-tab-B must never create a tiled Jelly pane.
 - Pipe IPC `ping` and `get_state` return valid JSON envelopes.
 - Daemon control-plane is healthy while toggling (`register_client` + `ping/pong` over `~/.jelly-j/daemon.sock`).
+- At least one harness path must execute a real chat turn through the same daemon used by Alt+j, and fail if the reply is missing/wrong.
+  - This catches failures that pane toggling alone cannot detect (eg. Claude subprocess/runtime path failures).
+  - `JJ_CLI_HARNESS_CHAT_PROBE=0` is for offline debugging only, not default verification.
+- For CLI harnesses against live Zellij servers, use a per-run copied plugin URL (`file:/tmp/.../jelly-j.wasm`) to avoid stale-plugin cache hits on unchanged URLs.
 
 ## 11) Sources
 

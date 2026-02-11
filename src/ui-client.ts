@@ -122,6 +122,7 @@ export async function runUiClient(): Promise<void> {
 
   let started = false;
   let shuttingDown = false;
+  let lastSigintAtMs = 0;
   let buffer = "";
   let registrationTimer: NodeJS.Timeout | undefined = setTimeout(() => {
     printError(
@@ -329,6 +330,11 @@ export async function runUiClient(): Promise<void> {
   });
 
   const handleSigint = () => {
+    const now = Date.now();
+    if (now - lastSigintAtMs < 120) {
+      return;
+    }
+    lastSigintAtMs = now;
     display("\n");
     printNote("Ctrl-C does not exit Jelly J. Use Alt+j to hide/show.", display);
     rl.prompt();

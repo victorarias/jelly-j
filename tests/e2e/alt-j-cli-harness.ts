@@ -54,13 +54,23 @@ type DaemonProbeResult = {
   durationMs: number;
 };
 
+type DaemonChatProbeResult = {
+  ok: boolean;
+  assistantText: string;
+  statusNotes: string[];
+  resultErrors: string[];
+  error?: string;
+  durationMs: number;
+};
+
 const ZELLIJ_BIN = process.env.ZELLIJ_BIN ?? "zellij";
 const SESSION_PREFIX = process.env.JJ_CLI_HARNESS_PREFIX ?? "jj-cli-harness";
 const ITERATIONS = Number.parseInt(process.env.JJ_CLI_HARNESS_ITERATIONS ?? "8", 10);
 const SLEEP_MS = Number.parseInt(process.env.JJ_CLI_HARNESS_SLEEP_MS ?? "250", 10);
-const PLUGIN_URL =
+const DEFAULT_PLUGIN_URL =
   process.env.JJ_PLUGIN_URL ??
   `file:${process.env.HOME ?? ""}/.config/zellij/plugins/jelly-j.wasm`;
+const COPY_PLUGIN_FOR_RUN = process.env.JJ_CLI_HARNESS_COPY_PLUGIN !== "0";
 const REQUIRED_PERMISSIONS = [
   "ReadApplicationState",
   "ChangeApplicationState",
@@ -69,6 +79,12 @@ const REQUIRED_PERMISSIONS = [
   "ReadCliPipes",
 ];
 const DAEMON_SOCKET_PATH = path.join(os.homedir(), ".jelly-j", "daemon.sock");
+const CHAT_PROBE_ENABLED = process.env.JJ_CLI_HARNESS_CHAT_PROBE !== "0";
+const CHAT_PROBE_TIMEOUT_MS = Number.parseInt(
+  process.env.JJ_CLI_HARNESS_CHAT_TIMEOUT_MS ?? "90000",
+  10,
+);
+let ACTIVE_PLUGIN_URL = DEFAULT_PLUGIN_URL;
 
 function run(args: string[], allowFailure = false, timeoutMs = 10_000): CmdResult {
   try {
@@ -145,6 +161,46 @@ function normalizePluginPath(pluginUrl: string): string | null {
     }
   }
   return pluginUrl;
+}
+
+function pluginUrlToPath(pluginUrl: string): string | null {
+  if (pluginUrl.startsWith("file:")) {
+    try {
+      return decodeURIComponent(new URL(pluginUrl).pathname);
+    } catch {
+      return pluginUrl.slice("file:".length);
+    }
+  }
+  if (path.isAbsolute(pluginUrl)) {
+    return pluginUrl;
+  }
+  return null;
+}
+
+function prepareHarnessPluginUrl(basePluginUrl: string): {
+  pluginUrl: string;
+  cleanup: () => void;
+} {
+  if (!COPY_PLUGIN_FOR_RUN) {
+    return { pluginUrl: basePluginUrl, cleanup: () => {} };
+  }
+
+  const sourcePath = pluginUrlToPath(basePluginUrl);
+  if (!sourcePath || !fs.existsSync(sourcePath)) {
+    return { pluginUrl: basePluginUrl, cleanup: () => {} };
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "jelly-j-plugin-"));
+  const copiedPath = path.join(tempDir, "jelly-j.wasm");
+  fs.copyFileSync(sourcePath, copiedPath);
+  const fileUrl = new URL(`file://${copiedPath}`).toString();
+
+  return {
+    pluginUrl: fileUrl,
+    cleanup: () => {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    },
+  };
 }
 
 function ensurePermissionsCached(pluginUrl: string): void {
@@ -339,7 +395,7 @@ function toggleFromHarness(session: string): TimedCmdResult {
       "--name",
       "toggle",
       "--plugin",
-      PLUGIN_URL,
+      ACTIVE_PLUGIN_URL,
       "--",
       "toggle",
     ],
@@ -488,7 +544,7 @@ function queryButlerState(session: string): ButlerWorkspaceState | null {
       "--name",
       "request",
       "--plugin",
-      PLUGIN_URL,
+      ACTIVE_PLUGIN_URL,
       "--",
       JSON.stringify({ op: "get_state" }),
     ],
@@ -519,7 +575,7 @@ function queryButlerTrace(session: string, limit = 80): string[] {
       "--name",
       "request",
       "--plugin",
-      PLUGIN_URL,
+      ACTIVE_PLUGIN_URL,
       "--",
       JSON.stringify({ op: "get_trace", limit }),
     ],
@@ -680,6 +736,159 @@ async function probeDaemonProtocolWithRetry(retries = 2): Promise<DaemonProbeRes
   return last;
 }
 
+async function probeDaemonChat(text: string): Promise<DaemonChatProbeResult> {
+  const start = Date.now();
+  const clientId = `chat-harness-${process.pid}-${Date.now().toString(36)}`;
+  const requestId = randomUUID();
+
+  return await new Promise<DaemonChatProbeResult>((resolve) => {
+    const socket = createConnection(DAEMON_SOCKET_PATH);
+    let settled = false;
+    let buffer = "";
+    let assistantText = "";
+    let errorMessage: string | undefined;
+    let chatRequestSent = false;
+    const statusNotes: string[] = [];
+    const resultErrors: string[] = [];
+
+    const finish = (result: Omit<DaemonChatProbeResult, "durationMs">): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        socket.destroy();
+      } catch {
+        // best effort
+      }
+      resolve({
+        ...result,
+        durationMs: Date.now() - start,
+      });
+    };
+
+    const timer = setTimeout(() => {
+      finish({
+        ok: false,
+        assistantText,
+        statusNotes,
+        resultErrors,
+        error: "chat_probe_timeout",
+      });
+    }, CHAT_PROBE_TIMEOUT_MS);
+
+    socket.once("connect", () => {
+      socket.write(
+        `${JSON.stringify({
+          type: "register_client",
+          clientId,
+          zellijSession: "cli-harness",
+          cwd: process.cwd(),
+          hostname: os.hostname(),
+          pid: process.pid,
+        })}\n`,
+      );
+    });
+
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      while (true) {
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) break;
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+
+        try {
+          const parsed = JSON.parse(line) as {
+            type?: string;
+            requestId?: string;
+            text?: string;
+            message?: string;
+            subtype?: string;
+            errors?: string[];
+            ok?: boolean;
+          };
+          if (parsed.type === "history_snapshot" && !chatRequestSent) {
+            chatRequestSent = true;
+            socket.write(
+              `${JSON.stringify({
+                type: "chat_request",
+                requestId,
+                clientId,
+                text,
+                zellijSession: "cli-harness",
+              })}\n`,
+            );
+            continue;
+          }
+          if (parsed.type === "status_note" && typeof parsed.message === "string") {
+            statusNotes.push(parsed.message);
+            continue;
+          }
+          if (
+            parsed.type === "chat_delta" &&
+            parsed.requestId === requestId &&
+            typeof parsed.text === "string"
+          ) {
+            assistantText += parsed.text;
+            continue;
+          }
+          if (
+            parsed.type === "result_error" &&
+            parsed.requestId === requestId &&
+            typeof parsed.subtype === "string" &&
+            Array.isArray(parsed.errors)
+          ) {
+            resultErrors.push(`[${parsed.subtype}] ${parsed.errors.join("; ")}`);
+            continue;
+          }
+          if (
+            parsed.type === "error" &&
+            parsed.requestId === requestId &&
+            typeof parsed.message === "string"
+          ) {
+            errorMessage = parsed.message;
+            continue;
+          }
+          if (parsed.type === "chat_end" && parsed.requestId === requestId) {
+            const ok = parsed.ok === true && !errorMessage;
+            finish({
+              ok,
+              assistantText: assistantText.trim(),
+              statusNotes,
+              resultErrors,
+              error: ok ? undefined : errorMessage ?? "chat_end_not_ok",
+            });
+            return;
+          }
+        } catch {
+          // Ignore malformed lines and keep waiting until timeout.
+        }
+      }
+    });
+
+    socket.once("error", (error) => {
+      const err = error as NodeJS.ErrnoException;
+      finish({
+        ok: false,
+        assistantText,
+        statusNotes,
+        resultErrors,
+        error: err.code ? `daemon_socket_${err.code}` : "daemon_socket_error",
+      });
+    });
+  });
+}
+
+async function probeDaemonChatWithRetry(text: string, retries = 1): Promise<DaemonChatProbeResult> {
+  let last = await probeDaemonChat(text);
+  for (let i = 0; i < retries && !last.ok; i += 1) {
+    await sleep(180);
+    last = await probeDaemonChat(text);
+  }
+  return last;
+}
+
 async function main(): Promise<void> {
   const session = `${SESSION_PREFIX}-${Date.now().toString(36)}`;
   const rssSamples: number[] = [];
@@ -692,6 +901,7 @@ async function main(): Promise<void> {
   let traceBeforeCleanup: string[] = [];
   let daemonProbeFailures = 0;
   const daemonProbeDurationsMs: number[] = [];
+  let chatProbe: DaemonChatProbeResult | undefined;
   let crossTabCheck:
     | {
         ok: boolean;
@@ -703,7 +913,9 @@ async function main(): Promise<void> {
     | undefined;
 
   deleteSessionsByPrefix(SESSION_PREFIX);
-  ensurePermissionsCached(PLUGIN_URL);
+  const preparedPlugin = prepareHarnessPluginUrl(DEFAULT_PLUGIN_URL);
+  ACTIVE_PLUGIN_URL = preparedPlugin.pluginUrl;
+  ensurePermissionsCached(ACTIVE_PLUGIN_URL);
 
   console.log(
     JSON.stringify({
@@ -711,7 +923,7 @@ async function main(): Promise<void> {
       session,
       iterations: ITERATIONS,
       sleepMs: SLEEP_MS,
-      pluginUrl: PLUGIN_URL,
+      pluginUrl: ACTIVE_PLUGIN_URL,
     }),
   );
 
@@ -770,12 +982,16 @@ async function main(): Promise<void> {
     }
 
     crossTabCheck = await runCrossTabFloatingCheck(session);
+    if (CHAT_PROBE_ENABLED) {
+      chatProbe = await probeDaemonChatWithRetry("Reply with exactly: ok", 1);
+    }
   } finally {
     traceBeforeCleanup = queryButlerTrace(session, 120);
     stopAttachedClient(attachedClientPid);
     deleteSession(session);
     await sleep(200);
     deleteSessionsByPrefix(SESSION_PREFIX);
+    preparedPlugin.cleanup();
   }
 
   const minRssKb = rssSamples.length ? Math.min(...rssSamples) : null;
@@ -831,6 +1047,13 @@ async function main(): Promise<void> {
   if (!crossTabCheck?.ok) {
     failures.push(`cross_tab_check_failed:${crossTabCheck?.reason ?? "unknown"}`);
   }
+  if (CHAT_PROBE_ENABLED) {
+    if (!chatProbe?.ok) {
+      failures.push(`chat_probe_failed:${chatProbe?.error ?? "unknown"}`);
+    } else if (!/\bok\b/i.test(chatProbe.assistantText)) {
+      failures.push("chat_probe_unexpected_text");
+    }
+  }
 
   console.log(
     JSON.stringify({
@@ -849,6 +1072,8 @@ async function main(): Promise<void> {
       toggleFailures,
       daemonProbeFailures,
       crossTabCheck,
+      chatProbeEnabled: CHAT_PROBE_ENABLED,
+      chatProbe,
       permissionApproveAttempts,
       lastButlerState,
       traceBeforeCleanup,

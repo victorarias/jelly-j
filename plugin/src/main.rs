@@ -330,6 +330,62 @@ impl State {
         })
     }
 
+    fn not_ready_response() -> Value {
+        Self::error_response("not_ready", "butler permissions not granted yet")
+    }
+
+    fn ensure_ready(&self) -> Result<(), Value> {
+        if self.ready {
+            Ok(())
+        } else {
+            Err(Self::not_ready_response())
+        }
+    }
+
+    fn tab_position_exists(&self, position: usize) -> bool {
+        self.tabs
+            .as_ref()
+            .is_some_and(|tabs| tabs.iter().any(|tab| tab.position == position))
+    }
+
+    fn terminal_pane_exists(&self, pane_id: u32) -> bool {
+        self.find_terminal_pane_by_id(pane_id).is_some()
+    }
+
+    fn ensure_tab_position_available(&self, position: usize) -> Result<(), Value> {
+        self.ensure_ready()?;
+        if self.tab_position_exists(position) {
+            Ok(())
+        } else {
+            Err(Self::error_response(
+                "tab_not_found",
+                format!("tab at position {} was not found", position),
+            ))
+        }
+    }
+
+    fn ensure_terminal_pane_available(&self, pane_id: u32) -> Result<(), Value> {
+        self.ensure_ready()?;
+        if self.terminal_pane_exists(pane_id) {
+            Ok(())
+        } else {
+            Err(Self::error_response(
+                "pane_not_found",
+                format!("pane id {} was not found", pane_id),
+            ))
+        }
+    }
+
+    fn show_pane_options(
+        should_float_if_hidden: Option<bool>,
+        should_focus_pane: Option<bool>,
+    ) -> (bool, bool) {
+        (
+            should_float_if_hidden.unwrap_or(true),
+            should_focus_pane.unwrap_or(true),
+        )
+    }
+
     fn respond_to_cli(source: &PipeSource, response: Option<Value>) {
         if let PipeSource::Cli(pipe_id) = source {
             if let Some(response) = response {
@@ -368,8 +424,8 @@ impl State {
         match request {
             ButlerRequest::Ping => Self::ok_response(json!({ "ok": true })),
             ButlerRequest::GetState => {
-                if !self.ready {
-                    return Self::error_response("not_ready", "butler permissions not granted yet");
+                if let Err(not_ready) = self.ensure_ready() {
+                    return not_ready;
                 }
                 let Some(state) = self.workspace_state_snapshot() else {
                     request_plugin_state_snapshot();
@@ -389,24 +445,24 @@ impl State {
                 Self::ok_response(json!({ "ok": true }))
             }
             ButlerRequest::RenameTab { position, name } => {
-                if !self.ready {
-                    return Self::error_response("not_ready", "butler permissions not granted yet");
+                if let Err(err) = self.ensure_tab_position_available(position) {
+                    return err;
                 }
                 self.push_trace(format!("rename_tab position={} name={}", position, name));
                 rename_tab(position as u32, name);
                 Self::ok_response(json!({ "ok": true }))
             }
             ButlerRequest::RenamePane { pane_id, name } => {
-                if !self.ready {
-                    return Self::error_response("not_ready", "butler permissions not granted yet");
+                if let Err(err) = self.ensure_terminal_pane_available(pane_id) {
+                    return err;
                 }
                 self.push_trace(format!("rename_pane pane_id={} name={}", pane_id, name));
                 rename_pane_with_id(PaneId::Terminal(pane_id), name);
                 Self::ok_response(json!({ "ok": true }))
             }
             ButlerRequest::HidePane { pane_id } => {
-                if !self.ready {
-                    return Self::error_response("not_ready", "butler permissions not granted yet");
+                if let Err(err) = self.ensure_terminal_pane_available(pane_id) {
+                    return err;
                 }
                 self.push_trace(format!("hide_pane pane_id={}", pane_id));
                 hide_pane_with_id(PaneId::Terminal(pane_id));
@@ -417,20 +473,16 @@ impl State {
                 should_float_if_hidden,
                 should_focus_pane,
             } => {
-                if !self.ready {
-                    return Self::error_response("not_ready", "butler permissions not granted yet");
+                if let Err(err) = self.ensure_terminal_pane_available(pane_id) {
+                    return err;
                 }
+                let (float_if_hidden, focus_pane) =
+                    Self::show_pane_options(should_float_if_hidden, should_focus_pane);
                 self.push_trace(format!(
                     "show_pane pane_id={} float_if_hidden={} focus={}",
-                    pane_id,
-                    should_float_if_hidden.unwrap_or(true),
-                    should_focus_pane.unwrap_or(true)
+                    pane_id, float_if_hidden, focus_pane
                 ));
-                show_pane_with_id(
-                    PaneId::Terminal(pane_id),
-                    should_float_if_hidden.unwrap_or(true),
-                    should_focus_pane.unwrap_or(true),
-                );
+                show_pane_with_id(PaneId::Terminal(pane_id), float_if_hidden, focus_pane);
                 Self::ok_response(json!({ "ok": true }))
             }
         }
@@ -510,12 +562,9 @@ impl State {
         !pane.exited
             && !pane.is_plugin
             && (pane.title == PANE_NAME
-                || pane
-                    .terminal_command
-                    .as_deref()
-                    .is_some_and(|command| {
-                        command.contains(launch_command) || command.contains(launch_executable)
-                    }))
+                || pane.terminal_command.as_deref().is_some_and(|command| {
+                    command.contains(launch_command) || command.contains(launch_executable)
+                }))
     }
 
     fn active_tab_index(&self) -> Option<usize> {

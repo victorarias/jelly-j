@@ -203,6 +203,16 @@ These are implementation constraints agents should treat as hard-won invariants 
    - Required sequence: hide -> `break_panes_to_tab_with_index` -> `toggle_pane_embed_or_eject_for_pane_id` -> `show_pane_with_id(..., true, true)`.
    - Keep a harness assertion that opening Jelly from another tab yields a floating pane on the active tab.
 
+21. Alt+j CLI harness must include a real chat turn by default.
+   - Toggle + daemon ping checks can pass while assistant execution is broken (`Claude Code process exited with code 1`, stale resume loops, bad runtime path).
+   - Keep one end-to-end daemon chat probe in `test:harness:cli` and fail if it does not complete with expected text.
+   - Allow opt-out only via explicit env flag (`JJ_CLI_HARNESS_CHAT_PROBE=0`) for offline debugging.
+
+22. Harness plugin URL must be cache-busted per run when verifying new wasm behavior.
+   - Long-lived Zellij servers can keep an older plugin instance cached for a stable URL.
+   - For `test:harness:cli`, copy the wasm to a per-run temp path and use that `file:` URL so checks run against current code.
+   - Only disable this explicitly (`JJ_CLI_HARNESS_COPY_PLUGIN=0`) when diagnosing URL/path issues.
+
 ## npm Distribution
 
 Published as `jelly-j` on npm. Build output is ESM with `#!/usr/bin/env bun` shebang and `dist/` is the published payload.
