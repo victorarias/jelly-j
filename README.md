@@ -14,6 +14,19 @@ It sees your entire workspace layout, understands what's running where,
 and reorganizes things on your behalf. It even checks in every 5 minutes
 to suggest improvements (like a tidy roommate, not an annoying one).
 
+## Experimental status and fork dependency
+
+Jelly J is currently experimental and depends on a custom Zellij fork.
+
+- Required Zellij fork: `git@github.com:victorarias/zellij.git` (currently `main`)
+- Reason: Jelly J relies on plugin-platform improvements that are not in current Zellij releases yet
+- Build dependency: `plugin/Cargo.toml` uses a local path dependency to `zellij-tile` (`../../../zellij/zellij-tile`)
+- Expected local checkout path for this repo layout: `~/projects/zellij`
+
+Important:
+- This setup is intentionally ahead of upstream; behavior may differ from stock Zellij.
+- If you run Jelly J against upstream release binaries, some launcher/butler behavior can degrade or fail.
+
 ## What it can do
 
 - **Name things** — tabs and panes, based on what's actually running
@@ -29,7 +42,7 @@ to suggest improvements (like a tidy roommate, not an annoying one).
 
 ### Prerequisites
 
-- [Zellij](https://zellij.dev) (v0.40+)
+- [Zellij fork](https://github.com/victorarias/zellij) (current experimental dependency for Jelly J)
 - [Bun](https://bun.sh) (v1.3+)
 - [Rust](https://www.rust-lang.org/tools/install) (for building the Zellij plugin)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (authenticated — Jelly J uses the Agent SDK which requires a valid Claude Code session)
