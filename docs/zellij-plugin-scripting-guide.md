@@ -12,7 +12,7 @@ Scope:
 - Test strategy for `Alt+j` stability
 
 Version notes:
-- Jelly J currently compiles against local Zellij `main` via `zellij-tile = { path = "../../../zellij/zellij-tile" }`.
+- Jelly J currently compiles against local Zellij `main` via `zellij-tile = { path = "../../zellij/zellij-tile" }`.
 - Verified source reference: `zellij-org/zellij` commit `97744ad0`.
 - On this target, `show_pane_with_id` takes 3 args:
   `show_pane_with_id(pane_id, should_float_if_hidden, should_focus_pane)`.
@@ -53,7 +53,7 @@ Jelly J uses `MessagePlugin` for `Alt+j`.
 
 ```kdl
 bind "Alt j" {
-    MessagePlugin "file:~/.config/zellij/plugins/jelly-j.wasm" {
+    MessagePlugin "file:/home/<your-user>/.config/zellij/plugins/jelly-j.wasm" {
         name "toggle"
         floating true
     }
@@ -63,6 +63,7 @@ bind "Alt j" {
 Guidelines:
 - Do not use `LaunchOrFocusPlugin` for Jelly J anymore.
 - Do not set `launch_new true` for this bind (singleton behavior is required).
+- Use an absolute `file:/...` plugin path (avoid `~` inside `MessagePlugin` URLs).
 - Default launch command should target UI mode (`jelly-j ui`) so plugin-launched panes always act as clients of the global daemon.
 
 ## 4) Pipe Protocol

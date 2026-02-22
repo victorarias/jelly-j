@@ -31,6 +31,7 @@
     "build": "bun build src/index.ts --outfile dist/index.js --target bun --format esm --banner '#!/usr/bin/env bun'",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit",
+    "setup:local": "bun scripts/setup-local.ts",
     "ops:restart": "bun scripts/restart-jellyj.ts",
     "test:harness:cli": "bun tests/e2e/alt-j-cli-harness.ts",
     "test:harness:global": "bun tests/e2e/global-presence-harness.ts",

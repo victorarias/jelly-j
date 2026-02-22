@@ -14,13 +14,21 @@ It sees your entire workspace layout, understands what's running where,
 and reorganizes things on your behalf. It even checks in every 5 minutes
 to suggest improvements (like a tidy roommate, not an annoying one).
 
+## IMPORTANT: Custom Zellij Required
+
+**Jelly J currently requires your custom Zellij fork and is not compatible with stock Zellij releases.**
+
+- Required fork: `git@github.com:victorarias/zellij.git` (branch: `main`)
+- Expected local path: `~/projects/zellij`
+- Reason: Jelly J depends on plugin-platform behavior that is not yet available in upstream Zellij releases.
+
 ## Experimental status and fork dependency
 
 Jelly J is currently experimental and depends on a custom Zellij fork.
 
 - Required Zellij fork: `git@github.com:victorarias/zellij.git` (currently `main`)
 - Reason: Jelly J relies on plugin-platform improvements that are not in current Zellij releases yet
-- Build dependency: `plugin/Cargo.toml` uses a local path dependency to `zellij-tile` (`../../../zellij/zellij-tile`)
+- Build dependency: `plugin/Cargo.toml` uses a local path dependency to `zellij-tile` (`../../zellij/zellij-tile`)
 - Expected local checkout path for this repo layout: `~/projects/zellij`
 
 Important:
@@ -56,10 +64,15 @@ jelly-j
 
 # Or clone for development
 git clone https://github.com/victorarias/jelly-j
-cd jelly-j && npm install && bun src/index.ts
+cd jelly-j
+npm install
+npm run setup:local
+jelly-j
 ```
 
-### Build and install plugin
+`npm run setup:local` builds and installs the plugin, patches common `Alt+j` bindings in `~/.config/zellij/config.kdl`, and reloads Zellij config best-effort.
+
+### Manual plugin install (fallback)
 
 ```bash
 cd plugin
@@ -75,7 +88,7 @@ Add to your `~/.config/zellij/config.kdl`:
 keybinds {
     shared {
         bind "Alt j" {
-            MessagePlugin "file:~/.config/zellij/plugins/jelly-j.wasm" {
+            MessagePlugin "file:/home/<your-user>/.config/zellij/plugins/jelly-j.wasm" {
                 name "toggle"
                 floating true
             }
@@ -83,6 +96,8 @@ keybinds {
     }
 }
 ```
+
+Use an absolute `file:/...` path in `MessagePlugin` (avoid `~` here).
 
 `MessagePlugin` sends `toggle` to the persistent butler plugin, launching it if needed.
 
@@ -231,6 +246,9 @@ Heartbeat uses Claude Haiku 4.5 (~$0.001/check × 12/hour × 8 hours ≈ **$0.10
 git clone https://github.com/victorarias/jelly-j
 cd jelly-j
 npm install
+
+# One-command local setup (plugin + Alt+j keybind)
+npm run setup:local
 
 # Run from source
 npm start
