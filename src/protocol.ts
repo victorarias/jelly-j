@@ -53,6 +53,11 @@ export type ClientToDaemonMessage =
       zellijSession?: string;
     }
   | {
+      type: "restart_daemon";
+      requestId: string;
+      clientId: string;
+    }
+  | {
       type: "ping";
       requestId: string;
       clientId: string;
@@ -111,6 +116,18 @@ export type DaemonToClientMessage =
       type: "pong";
       requestId: string;
       daemonPid: number;
+    }
+  | {
+      type: "new_session_result";
+      requestId: string;
+      ok: boolean;
+      message: string;
+    }
+  | {
+      type: "restart_result";
+      requestId: string;
+      ok: boolean;
+      message: string;
     }
   | {
       type: "error";

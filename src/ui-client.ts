@@ -28,6 +28,8 @@ const DAEMON_REGISTRATION_TIMEOUT_MS = 2_500;
 type UiSessionState = {
   currentModel: ModelAlias;
   activeRequestId?: string;
+  pendingNewSessionRequestId?: string;
+  pendingRestartRequestId?: string;
   spinner?: Spinner;
   writer: StreamWriter;
   readlinePaused: boolean;
@@ -86,6 +88,22 @@ function renderHistory(entries: HistoryEntry[], display: (text: string) => void)
     display(`  ${formatHistoryEntry(entry)}\n`);
   }
   printNote("end replay", display);
+}
+
+function resetConversationScreen(
+  rl: ReturnType<typeof createInterface>,
+  state: UiSessionState,
+  display: (text: string) => void
+): void {
+  stopSpinner(state);
+  state.writer.flushLine();
+  // Clear screen + scrollback and move cursor home.
+  display("\x1b[2J\x1b[3J\x1b[H");
+  display(renderWelcome(state.currentModel));
+  if (state.readlinePaused) {
+    rl.resume();
+    state.readlinePaused = false;
+  }
 }
 
 export async function runUiClient(): Promise<void> {
@@ -219,8 +237,56 @@ export async function runUiClient(): Promise<void> {
         }
         break;
       }
+      case "new_session_result": {
+        if (
+          state.pendingNewSessionRequestId &&
+          message.requestId !== state.pendingNewSessionRequestId
+        ) {
+          break;
+        }
+        state.pendingNewSessionRequestId = undefined;
+        if (message.ok) {
+          resetConversationScreen(rl, state, display);
+          printNote(message.message, display);
+          rl.prompt();
+        } else {
+          printError(message.message, display);
+          if (!state.activeRequestId) {
+            rl.prompt();
+          }
+        }
+        break;
+      }
+      case "restart_result": {
+        if (
+          state.pendingRestartRequestId &&
+          message.requestId !== state.pendingRestartRequestId
+        ) {
+          break;
+        }
+        state.pendingRestartRequestId = undefined;
+        if (!message.ok) {
+          printError(message.message, display);
+          if (!state.activeRequestId) {
+            rl.prompt();
+          }
+          break;
+        }
+
+        stopSpinner(state);
+        state.writer.flushLine();
+        printNote(message.message, display);
+        printNote("this UI will close; press Alt+j to reconnect", display);
+        shuttingDown = true;
+        socket.end();
+        rl.close();
+        break;
+      }
       case "error": {
         state.writer.flushLine();
+        if (message.requestId && message.requestId === state.pendingRestartRequestId) {
+          state.pendingRestartRequestId = undefined;
+        }
         printError(message.message, display);
         if (message.requestId && state.activeRequestId === message.requestId) {
           restorePrompt(rl, state, display);
@@ -302,7 +368,7 @@ export async function runUiClient(): Promise<void> {
     if (commandResult.handled) {
       if (commandResult.isError) {
         printError(commandResult.message, display);
-      } else {
+      } else if (!commandResult.resetSession) {
         printNote(commandResult.message, display);
       }
 
@@ -318,11 +384,22 @@ export async function runUiClient(): Promise<void> {
 
       if (!commandResult.isError && commandResult.resetSession) {
         const requestId = randomUUID();
+        state.pendingNewSessionRequestId = requestId;
         send(socket, {
           type: "new_session",
           requestId,
           clientId,
           zellijSession,
+        });
+      }
+
+      if (!commandResult.isError && commandResult.restartDaemon) {
+        const requestId = randomUUID();
+        state.pendingRestartRequestId = requestId;
+        send(socket, {
+          type: "restart_daemon",
+          requestId,
+          clientId,
         });
       }
 

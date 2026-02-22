@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { createServer, type Socket } from "node:net";
 import { appendFile, mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -59,6 +60,26 @@ function normalizeString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function scheduleDaemonRespawn(): void {
+  const runtime = process.argv[0];
+  const entrypoint = process.argv[1];
+  if (!runtime || !entrypoint) return;
+
+  const escapedRuntime = runtime.replace(/'/g, `'\\''`);
+  const escapedEntrypoint = entrypoint.replace(/'/g, `'\\''`);
+  const script = `sleep 0.25; '${escapedRuntime}' '${escapedEntrypoint}' daemon >/dev/null 2>&1`;
+
+  const child = spawn("sh", ["-c", script], {
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      JELLY_J_DAEMON_MODE: "1",
+    },
+  });
+  child.unref();
 }
 
 function send(socket: Socket, message: DaemonToClientMessage): void {
@@ -457,8 +478,9 @@ export async function runDaemon(): Promise<void> {
       case "new_session": {
         if (processing || queue.length > 0) {
           sendToClientId(message.clientId, {
-            type: "error",
+            type: "new_session_result",
             requestId: message.requestId,
+            ok: false,
             message: "cannot start a new session while requests are in progress",
           });
           break;
@@ -472,9 +494,35 @@ export async function runDaemon(): Promise<void> {
         await persistDaemonState(lastActiveSession);
 
         sendToClientId(message.clientId, {
-          type: "status_note",
-          message: "new Claude session created (future turns start fresh)",
+          type: "new_session_result",
+          requestId: message.requestId,
+          ok: true,
+          message: "new Claude session created",
         });
+        break;
+      }
+      case "restart_daemon": {
+        if (processing || queue.length > 0) {
+          sendToClientId(message.clientId, {
+            type: "restart_result",
+            requestId: message.requestId,
+            ok: false,
+            message: "cannot restart while requests are in progress",
+          });
+          break;
+        }
+
+        sendToClientId(message.clientId, {
+          type: "restart_result",
+          requestId: message.requestId,
+          ok: true,
+          message: "daemon restarting",
+        });
+
+        scheduleDaemonRespawn();
+        setTimeout(() => {
+          void cleanupAndExit(0);
+        }, 50);
         break;
       }
       case "ping": {

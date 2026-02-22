@@ -15,6 +15,7 @@ export type SlashCommandResult =
       message: string;
       isError: boolean;
       resetSession?: boolean;
+      restartDaemon?: boolean;
     };
 
 export function modelIdForAlias(alias: ModelAlias): ChatModel {
@@ -38,7 +39,7 @@ export function handleSlashCommand(
       handled: true,
       nextModel: currentModel,
       isError: true,
-      message: "empty command. use /model, /model <opus|haiku>, or /new",
+      message: "empty command. use /model, /model <opus|haiku>, /new, or /restart",
     };
   }
 
@@ -61,12 +62,31 @@ export function handleSlashCommand(
     };
   }
 
+  if (command === "restart") {
+    if (args.length > 0) {
+      return {
+        handled: true,
+        nextModel: currentModel,
+        isError: true,
+        message: "usage: /restart",
+      };
+    }
+
+    return {
+      handled: true,
+      nextModel: currentModel,
+      isError: false,
+      restartDaemon: true,
+      message: "restarting daemon",
+    };
+  }
+
   if (command !== "model") {
     return {
       handled: true,
       nextModel: currentModel,
       isError: true,
-      message: `unknown command: /${command}. supported: /model, /new`,
+      message: `unknown command: /${command}. supported: /model, /new, /restart`,
     };
   }
 
