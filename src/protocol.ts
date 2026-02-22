@@ -47,6 +47,12 @@ export type ClientToDaemonMessage =
       alias: ModelAlias;
     }
   | {
+      type: "new_session";
+      requestId: string;
+      clientId: string;
+      zellijSession?: string;
+    }
+  | {
       type: "ping";
       requestId: string;
       clientId: string;

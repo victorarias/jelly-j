@@ -454,6 +454,29 @@ export async function runDaemon(): Promise<void> {
         });
         break;
       }
+      case "new_session": {
+        if (processing || queue.length > 0) {
+          sendToClientId(message.clientId, {
+            type: "error",
+            requestId: message.requestId,
+            message: "cannot start a new session while requests are in progress",
+          });
+          break;
+        }
+
+        sessionId = undefined;
+        const requestedSession = normalizeString(message.zellijSession);
+        if (requestedSession) {
+          lastActiveSession = requestedSession;
+        }
+        await persistDaemonState(lastActiveSession);
+
+        sendToClientId(message.clientId, {
+          type: "status_note",
+          message: "new Claude session created (future turns start fresh)",
+        });
+        break;
+      }
       case "ping": {
         sendToClientId(message.clientId, {
           type: "pong",

@@ -316,6 +316,16 @@ export async function runUiClient(): Promise<void> {
         });
       }
 
+      if (!commandResult.isError && commandResult.resetSession) {
+        const requestId = randomUUID();
+        send(socket, {
+          type: "new_session",
+          requestId,
+          clientId,
+          zellijSession,
+        });
+      }
+
       rl.prompt();
       return;
     }

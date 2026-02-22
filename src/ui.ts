@@ -43,7 +43,7 @@ export function renderWelcome(model: ModelAlias): string {
   const jelly = JELLYFISH.map((l) => colorize(l, "info")).join("\n");
   const name = bold(colorize("Jelly J", "info"));
   const modelBadge = colorize(model, "meta");
-  const hints = colorize("/model to switch · Alt+j to hide/show", "muted");
+  const hints = colorize("/model to switch · /new for fresh chat · Alt+j to hide/show", "muted");
   return `\n${jelly}\n\n${INDENT}${name} ${DOT} ${modelBadge}\n${INDENT}${hints}\n`;
 }
 

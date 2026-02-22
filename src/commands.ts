@@ -14,6 +14,7 @@ export type SlashCommandResult =
       nextModel: ModelAlias;
       message: string;
       isError: boolean;
+      resetSession?: boolean;
     };
 
 export function modelIdForAlias(alias: ModelAlias): ChatModel {
@@ -37,7 +38,26 @@ export function handleSlashCommand(
       handled: true,
       nextModel: currentModel,
       isError: true,
-      message: "empty command. use /model or /model <opus|haiku>",
+      message: "empty command. use /model, /model <opus|haiku>, or /new",
+    };
+  }
+
+  if (command === "new") {
+    if (args.length > 0) {
+      return {
+        handled: true,
+        nextModel: currentModel,
+        isError: true,
+        message: "usage: /new",
+      };
+    }
+
+    return {
+      handled: true,
+      nextModel: currentModel,
+      isError: false,
+      resetSession: true,
+      message: "starting a fresh Claude session for new turns",
     };
   }
 
@@ -46,7 +66,7 @@ export function handleSlashCommand(
       handled: true,
       nextModel: currentModel,
       isError: true,
-      message: `unknown command: /${command}. only /model is supported`,
+      message: `unknown command: /${command}. supported: /model, /new`,
     };
   }
 
