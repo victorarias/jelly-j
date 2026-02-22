@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { buildZellijEnv, resolveZellijBinary } from "./zellij.js";
 
 const execFileAsync = promisify(execFile);
 const REQUEST_TIMEOUT_MS = 8_000;
@@ -102,7 +103,7 @@ async function pipeRequest<T>(payload: ButlerRequest): Promise<T> {
   let stdout: string;
   try {
     ({ stdout } = await execFileAsync(
-      "zellij",
+      resolveZellijBinary(),
       [
         "pipe",
         "--plugin",
@@ -112,7 +113,7 @@ async function pipeRequest<T>(payload: ButlerRequest): Promise<T> {
         "--",
         JSON.stringify(payload),
       ],
-      { timeout: REQUEST_TIMEOUT_MS }
+      { timeout: REQUEST_TIMEOUT_MS, env: buildZellijEnv() }
     ));
   } catch (error) {
     throw pipeExecError(error, REQUEST_TIMEOUT_MS);
@@ -188,9 +189,9 @@ export async function showPaneById(
 export async function toggleButler(): Promise<void> {
   try {
     await execFileAsync(
-      "zellij",
+      resolveZellijBinary(),
       ["pipe", "--plugin", pluginUrl(), "--name", "toggle", "--", "toggle"],
-      { timeout: TOGGLE_TIMEOUT_MS }
+      { timeout: TOGGLE_TIMEOUT_MS, env: buildZellijEnv() }
     );
   } catch (error) {
     throw pipeExecError(error, TOGGLE_TIMEOUT_MS);

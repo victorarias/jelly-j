@@ -9,11 +9,25 @@ export interface HistoryEntry {
   text: string;
 }
 
+/**
+ * Zellij environment context captured by the UI client.
+ * Contains the env vars needed for `zellij action` / `zellij pipe` to work.
+ */
+export interface ZellijEnvContext {
+  /** ZELLIJ env var — IPC socket path required by `zellij action` / `zellij pipe`. */
+  ZELLIJ?: string;
+  /** ZELLIJ_SESSION_NAME env var — session name. */
+  ZELLIJ_SESSION_NAME?: string;
+  /** Resolved path to the zellij binary that matches the running server version. */
+  zellijBinary?: string;
+}
+
 export type ClientToDaemonMessage =
   | {
       type: "register_client";
       clientId: string;
       zellijSession?: string;
+      zellijEnv?: ZellijEnvContext;
       cwd?: string;
       hostname?: string;
       pid?: number;
@@ -24,6 +38,7 @@ export type ClientToDaemonMessage =
       clientId: string;
       text: string;
       zellijSession?: string;
+      zellijEnv?: ZellijEnvContext;
     }
   | {
       type: "set_model";

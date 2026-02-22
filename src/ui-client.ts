@@ -18,7 +18,9 @@ import {
   type ClientToDaemonMessage,
   type DaemonToClientMessage,
   type HistoryEntry,
+  type ZellijEnvContext,
 } from "./protocol.js";
+import { detectZellijBinary } from "./zellij.js";
 
 const EXIT_ALIASES = new Set(["exit", "bye", "quit", "q"]);
 const DAEMON_REGISTRATION_TIMEOUT_MS = 2_500;
@@ -90,6 +92,12 @@ export async function runUiClient(): Promise<void> {
   const display = (text: string) => process.stdout.write(text);
   const clientId = `ui-${process.pid}-${Date.now().toString(36)}`;
   const zellijSession = normalizeString(process.env.ZELLIJ_SESSION_NAME);
+  const zellijBinary = await detectZellijBinary(zellijSession);
+  const zellijEnv: ZellijEnvContext = {
+    ZELLIJ: normalizeString(process.env.ZELLIJ),
+    ZELLIJ_SESSION_NAME: zellijSession,
+    zellijBinary,
+  };
 
   const socket = createConnection(DAEMON_SOCKET_PATH);
 
@@ -115,6 +123,7 @@ export async function runUiClient(): Promise<void> {
     type: "register_client",
     clientId,
     zellijSession,
+    zellijEnv,
     cwd: process.cwd(),
     hostname: os.hostname(),
     pid: process.pid,
@@ -326,6 +335,7 @@ export async function runUiClient(): Promise<void> {
       clientId,
       text: input,
       zellijSession,
+      zellijEnv,
     });
   });
 

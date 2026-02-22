@@ -17,12 +17,15 @@ import {
   encodeMessage,
   type ClientToDaemonMessage,
   type DaemonToClientMessage,
+  type ZellijEnvContext,
 } from "./protocol.js";
+import { setActiveZellijEnv } from "./zellij.js";
 
 type ClientConnection = {
   socket: Socket;
   clientId?: string;
   zellijSession?: string;
+  zellijEnv?: ZellijEnvContext;
 };
 
 type PendingChatRequest = {
@@ -30,6 +33,7 @@ type PendingChatRequest = {
   clientId: string;
   text: string;
   zellijSession?: string;
+  zellijEnv?: ZellijEnvContext;
 };
 
 const TRACE_PATH = path.join(STATE_DIR, "daemon.trace.log");
@@ -174,6 +178,13 @@ export async function runDaemon(): Promise<void> {
 
     const client = clientsById.get(next.clientId);
     const currentSession = normalizeString(next.zellijSession) ?? normalizeString(client?.zellijSession);
+
+    // Set the active Zellij env context so zellij action/pipe commands use the
+    // correct IPC socket from the requesting client's Zellij session.
+    const zellijEnv = next.zellijEnv ?? client?.zellijEnv;
+    setActiveZellijEnv(zellijEnv);
+    trace(`zellij_env ZELLIJ=${zellijEnv?.ZELLIJ ?? "(unset)"} session=${zellijEnv?.ZELLIJ_SESSION_NAME ?? "(unset)"}`);
+
     const sessionContextNotes = [requestTimeContext()];
     if (currentSession && lastActiveSession && currentSession !== lastActiveSession) {
       sessionContextNotes.push(
@@ -376,6 +387,7 @@ export async function runDaemon(): Promise<void> {
     trace(`register clientId=${message.clientId} session=${message.zellijSession ?? ""}`);
     connection.clientId = message.clientId;
     connection.zellijSession = normalizeString(message.zellijSession);
+    connection.zellijEnv = message.zellijEnv;
     clientsById.set(message.clientId, connection);
 
     send(connection.socket, {
@@ -416,6 +428,7 @@ export async function runDaemon(): Promise<void> {
           clientId: message.clientId,
           text: message.text,
           zellijSession: normalizeString(message.zellijSession),
+          zellijEnv: message.zellijEnv,
         });
         const queuedAhead = Math.max(0, queue.length - 1 + (processing ? 1 : 0));
         if (queuedAhead > 0) {
