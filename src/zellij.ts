@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readlink } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { ZellijEnvContext } from "./protocol.js";
@@ -73,12 +73,39 @@ export function resolveZellijBinary(): string {
 export async function zellijAction(
   ...args: string[]
 ): Promise<ZellijResult> {
-  const { stdout, stderr } = await execFileAsync(
-    resolveZellijBinary(),
-    ["action", ...args],
-    { timeout: TIMEOUT_MS, env: buildZellijEnv() }
-  );
-  return { stdout: stdout.trim(), stderr: stderr.trim() };
+  const binary = resolveZellijBinary();
+  const env = buildZellijEnv();
+
+  return new Promise<ZellijResult>((resolve, reject) => {
+    const child = spawn(binary, ["action", ...args], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error(`zellij action timed out after ${TIMEOUT_MS}ms`));
+    }, TIMEOUT_MS);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `zellij action exited with code ${code}`));
+      } else {
+        resolve({ stdout: stdout.trim(), stderr: stderr.trim() });
+      }
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
 }
 
 /**

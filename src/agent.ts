@@ -493,32 +493,9 @@ function renderMessage(message: SDKMessage, events: ChatEvents): void {
 
 /**
  * One-shot query for the heartbeat system using Haiku.
+ * The prompt is built by the caller (heartbeat.ts) and passed in directly.
  */
-export async function heartbeatQuery(
-  layoutDump: string,
-  tabNames: string
-): Promise<string> {
-  const now = new Date();
-  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown";
-  const prompt = `Current Zellij workspace state:
-
-Current local time: ${now.toISOString()} (${tz})
-
-Tab names: ${tabNames}
-
-Layout dump:
-${layoutDump}
-
-You are a workspace organization assistant. Look at this workspace state and determine if there's anything worth suggesting to the user. Consider:
-- Unnamed tabs (>3 unnamed → suggest naming based on running commands)
-- Overcrowded tabs (>4 panes in one tab → suggest splitting)
-- Similar panes across tabs (same command type → suggest grouping)
-- Empty/idle tabs
-- Disorganized layouts
-
-If there's a useful suggestion, respond with a SHORT one-liner suggestion (max 80 chars).
-If nothing worth suggesting, respond with exactly: NOTHING`;
-
+export async function heartbeatQuery(prompt: string): Promise<string> {
   let result = "";
 
   const options: Options = {
@@ -531,7 +508,7 @@ If nothing worth suggesting, respond with exactly: NOTHING`;
 
   for await (const message of query({ prompt, options })) {
     if (message.type === "result" && message.subtype === "success") {
-      result = message.result ?? "NOTHING";
+      result = message.result ?? "{}";
     }
   }
 

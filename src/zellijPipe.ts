@@ -1,10 +1,8 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { buildZellijEnv, resolveZellijBinary } from "./zellij.js";
 
-const execFileAsync = promisify(execFile);
 const REQUEST_TIMEOUT_MS = 8_000;
 const TOGGLE_TIMEOUT_MS = 3_000;
 
@@ -100,21 +98,57 @@ function pluginUrl(): string {
 }
 
 async function pipeRequest<T>(payload: ButlerRequest): Promise<T> {
+  const binary = resolveZellijBinary();
+  const env = buildZellijEnv();
+  const args = [
+    "pipe",
+    "--plugin",
+    pluginUrl(),
+    "--name",
+    "request",
+    "--",
+    JSON.stringify(payload),
+  ];
+
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync(
-      resolveZellijBinary(),
-      [
-        "pipe",
-        "--plugin",
-        pluginUrl(),
-        "--name",
-        "request",
-        "--",
-        JSON.stringify(payload),
-      ],
-      { timeout: REQUEST_TIMEOUT_MS, env: buildZellijEnv() }
-    ));
+    stdout = await new Promise<string>((resolve, reject) => {
+      const child = spawn(binary, args, {
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let out = "";
+      let err = "";
+      child.stdout.on("data", (chunk: Buffer) => { out += chunk.toString(); });
+      child.stderr.on("data", (chunk: Buffer) => { err += chunk.toString(); });
+
+      const timer = setTimeout(() => {
+        child.kill("SIGTERM");
+        reject(
+          Object.assign(new Error(`Butler pipe timed out after ${REQUEST_TIMEOUT_MS}ms`), {
+            code: "ETIMEDOUT",
+            killed: true,
+            signal: "SIGTERM",
+          })
+        );
+      }, REQUEST_TIMEOUT_MS);
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (code !== 0) {
+          const msg = err.trim() || out.trim() || `zellij pipe exited with code ${code}`;
+          reject(Object.assign(new Error(msg), { code: `EXIT_${code}` }));
+        } else {
+          resolve(out);
+        }
+      });
+
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
   } catch (error) {
     throw pipeExecError(error, REQUEST_TIMEOUT_MS);
   }
@@ -188,11 +222,39 @@ export async function showPaneById(
 
 export async function toggleButler(): Promise<void> {
   try {
-    await execFileAsync(
-      resolveZellijBinary(),
-      ["pipe", "--plugin", pluginUrl(), "--name", "toggle", "--", "toggle"],
-      { timeout: TOGGLE_TIMEOUT_MS, env: buildZellijEnv() }
-    );
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(
+        resolveZellijBinary(),
+        ["pipe", "--plugin", pluginUrl(), "--name", "toggle", "--", "toggle"],
+        { env: buildZellijEnv(), stdio: ["ignore", "ignore", "pipe"] }
+      );
+
+      let err = "";
+      child.stderr.on("data", (chunk: Buffer) => { err += chunk.toString(); });
+
+      const timer = setTimeout(() => {
+        child.kill("SIGTERM");
+        reject(
+          Object.assign(new Error(`Toggle pipe timed out after ${TOGGLE_TIMEOUT_MS}ms`), {
+            code: "ETIMEDOUT",
+          })
+        );
+      }, TOGGLE_TIMEOUT_MS);
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (code !== 0) {
+          reject(Object.assign(new Error(err.trim() || `toggle exited with code ${code}`), { code: `EXIT_${code}` }));
+        } else {
+          resolve();
+        }
+      });
+
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
   } catch (error) {
     throw pipeExecError(error, TOGGLE_TIMEOUT_MS);
   }

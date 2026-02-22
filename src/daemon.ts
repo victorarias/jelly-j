@@ -4,6 +4,7 @@ import path from "node:path";
 import { chat } from "./agent.js";
 import { modelIdForAlias, type ModelAlias } from "./commands.js";
 import { appendHistoryEntry, readHistorySnapshot } from "./history.js";
+import { startHeartbeat, stopHeartbeat, setBusy, updateHeartbeatZellijEnv } from "./heartbeat.js";
 import { logTranscriptTurn } from "./logging.js";
 import {
   acquireAgentLock,
@@ -131,6 +132,7 @@ export async function runDaemon(): Promise<void> {
     if (cleaningUp) return;
     cleaningUp = true;
     trace(`cleanup exitCode=${exitCode}`);
+    stopHeartbeat();
     try {
       server.close();
     } catch {
@@ -171,6 +173,7 @@ export async function runDaemon(): Promise<void> {
     const next = queue.shift();
     if (!next) return;
     processing = true;
+    setBusy(true);
 
     let assistantText = "";
     let hadError = false;
@@ -379,6 +382,7 @@ export async function runDaemon(): Promise<void> {
       });
     } finally {
       processing = false;
+      setBusy(false);
       void processQueue();
     }
   }
@@ -388,6 +392,7 @@ export async function runDaemon(): Promise<void> {
     connection.clientId = message.clientId;
     connection.zellijSession = normalizeString(message.zellijSession);
     connection.zellijEnv = message.zellijEnv;
+    updateHeartbeatZellijEnv(message.zellijEnv);
     clientsById.set(message.clientId, connection);
 
     send(connection.socket, {
@@ -532,6 +537,8 @@ export async function runDaemon(): Promise<void> {
     server.listen(DAEMON_SOCKET_PATH, resolve);
   });
   trace(`listening socket=${DAEMON_SOCKET_PATH}`);
+
+  startHeartbeat();
 
   process.on("SIGTERM", () => {
     void cleanupAndExit(0);

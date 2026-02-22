@@ -449,7 +449,9 @@ impl State {
                     return err;
                 }
                 self.push_trace(format!("rename_tab position={} name={}", position, name));
-                rename_tab(position as u32, name);
+                // Zellij's rename_tab API takes a 1-based tab index, but butler
+                // state reports 0-based positions. Convert accordingly.
+                rename_tab((position + 1) as u32, name);
                 Self::ok_response(json!({ "ok": true }))
             }
             ButlerRequest::RenamePane { pane_id, name } => {
