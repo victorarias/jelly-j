@@ -8,8 +8,8 @@ import {
 import { setActiveZellijEnv, getActiveZellijEnv, zellijAction } from "./zellij.js";
 import type { ZellijEnvContext } from "./protocol.js";
 
-const HEARTBEAT_INTERVAL_MS = 1 * 60 * 1000; // 1 minute (testing)
-const INITIAL_DELAY_MS = 30 * 1000; // 30 seconds (testing)
+const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+const INITIAL_DELAY_MS = 2 * 60 * 1000; // 2 minutes
 
 /** Zellij default tab name pattern: "Tab #1", "Tab #2", etc. */
 const DEFAULT_TAB_NAME = /^Tab #\d+$/;
